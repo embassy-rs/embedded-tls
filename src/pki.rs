@@ -47,40 +47,6 @@ pub struct CertificateNames {
     pub san_dns_names: heapless::Vec<heapless::String<HOSTNAME_MAXLEN>, MAX_SAN_DNS_NAMES>,
 }
 
-pub struct CertificateChain<'a> {
-    prev: &'a CertificateEntryRef<'a>,
-    chain: &'a ServerCertificate<'a>,
-    idx: isize,
-}
-
-impl<'a> CertificateChain<'a> {
-    pub fn new(ca: &'a CertificateEntryRef, chain: &'a ServerCertificate<'a>) -> Self {
-        Self {
-            prev: ca,
-            chain,
-            idx: chain.entries.len() as isize - 1,
-        }
-    }
-}
-
-impl<'a> Iterator for CertificateChain<'a> {
-    type Item = (&'a CertificateEntryRef<'a>, &'a CertificateEntryRef<'a>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.idx < 0 {
-            return None;
-        }
-
-        let cur = &self.chain.entries[self.idx as usize];
-        let out = (self.prev, cur);
-
-        self.prev = cur;
-        self.idx -= 1;
-
-        Some(out)
-    }
-}
-
 pub struct CertVerifier<'a, CipherSuite, Clock, const CERT_SIZE: usize>
 where
     Clock: TlsClock,
@@ -128,13 +94,30 @@ where
         transcript: &CipherSuite::Hash,
         cert: ServerCertificate,
     ) -> Result<(), TlsError> {
+        let mut last_trusted_certificate = None;
         let mut names = CertificateNames {
             common_name: None,
             san_dns_names: heapless::Vec::new(),
         };
 
-        for (p, q) in CertificateChain::new(&(&self.ca).into(), &cert) {
-            names = verify_certificate(p, q, Clock::now())?;
+        for certificate in cert.entries.iter().rev() {
+            match last_trusted_certificate {
+                Some(trusted_cert) => {
+                    names = verify_certificate(trusted_cert, certificate, Clock::now())?;
+                }
+                None => match verify_certificate(&(&self.ca).into(), certificate, Clock::now()) {
+                    Ok(provided_names) => {
+                        names = provided_names;
+                        last_trusted_certificate = Some(certificate);
+                    }
+                    Err(TlsError::InvalidCertificate) => {} // Only an error if we are at the leaf
+                    Err(tls_error) => return Err(tls_error),
+                },
+            }
+        }
+
+        if last_trusted_certificate.is_none() {
+            return Err(TlsError::InvalidCertificate);
         }
 
         if !tls_hostname_match(&names, &self.host) {
