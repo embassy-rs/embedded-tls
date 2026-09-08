@@ -104,6 +104,7 @@ where
             match last_trusted_certificate {
                 Some(trusted_cert) => {
                     names = verify_certificate(trusted_cert, certificate, Clock::now())?;
+                    last_trusted_certificate = Some(certificate)
                 }
                 None => match verify_certificate(&(&self.ca).into(), certificate, Clock::now()) {
                     Ok(provided_names) => {
