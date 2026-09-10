@@ -92,7 +92,7 @@ pub struct DecodedCertificate<'a> {
     pub signature: BitStringRef<'a>,
 }
 
-#[derive(Debug, Sequence, ValueOrd)]
+#[derive(Debug, Sequence, ValueOrd, PartialEq)]
 pub struct AttributeTypeAndValue<'a> {
     pub oid: ObjectIdentifier,
     pub value: AnyRef<'a>,
@@ -169,6 +169,8 @@ pub struct SubjectPublicKeyInfoRef<'a> {
 
 #[derive(Debug, Sequence, ValueOrd)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+/// (RFC5280, Section 4.1)
+/// To Be Signed certificate
 pub struct TbsCertificate<'a> {
     #[asn1(context_specific = "0", default = "Default::default")]
     pub version: Version,
@@ -191,15 +193,12 @@ pub struct TbsCertificate<'a> {
     pub extensions: Option<SequenceOf<ExtensionIdAndValue<'a>, 12>>,
 }
 
-/// Extract CommonName (CN) from the subject.
-///
-/// Parses the rdnSequence field of a TBS certificate, locates the
-/// Common Name (OID 2.5.4.3), and returns it.
+/// Extract Common Name (CN) from the subject.
 ///
 /// Returns `None` if no common name is present or does not fit into
 /// `heapless::String<64>`.
-pub fn extract_common_name<'a>(
-    tbs: &TbsCertificate<'a>,
+pub fn try_extract_subject_common_name(
+    tbs: &TbsCertificate,
 ) -> Result<Option<heapless::String<64>>, der::Error> {
     let mut common_name = None;
 
