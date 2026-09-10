@@ -23,6 +23,16 @@ openssl req -new -sha256 -key im-server-key.pem -out im-server.csr -subj "/CN=No
 openssl x509 -req -in im-server.csr -CA im-cert.pem -CAkey im-key.pem -CAcreateserial -out im-server-cert.pem -days 10000 -sha256 -copy_extensions copy
 cat im-server-cert.pem im-cert.pem > chain-cert.pem
 
+# Create a second, unrelated root CA
+openssl ecparam -name prime256v1 -genkey -noout -out other-root-key.pem
+openssl req -new -x509 -sha256 -key other-root-key.pem -days 10000 -out other-root-cert.pem -subj "/CN=Other Root CA"
+
+# Cross-sign CA
+# (same public key as ca-cert.pem, but signed by "Other Root CA")
+openssl req -new -key ca-key.pem -out ca-cross-signed.csr -subj "/CN=Test CA Cross-Signed"
+openssl x509 -req -in ca-cross-signed.csr -CA other-root-cert.pem -CAkey other-root-key.pem -CAcreateserial -out ca-cross-signed-cert.pem -days 10000 -sha256
+rm -f other-root-cert.srl
+
 # Create Ed25519 CA private key and certificate
 #openssl genpkey -algorithm ed25519 -out ed-ca-key.pem
 #openssl req -new -x509 -sha256 -key ed-ca-key.pem -days 10000 -out ed-ca-cert.pem

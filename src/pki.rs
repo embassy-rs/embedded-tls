@@ -739,6 +739,117 @@ fn tls_hostname_match_impl(cn: &[u8], host: &[u8]) -> bool {
     true
 }
 
+#[cfg(all(test, feature = "std"))]
+mod cert_verifier_tests {
+    use super::*;
+    use crate::config::Aes128GcmSha256;
+    use std::time::SystemTime;
+
+    /// Runs a chain of certificates through the verifier.
+    /// CA is the trust anchor.
+    fn verify(ca: &[u8], chain: &[&[u8]]) -> Result<(), TlsError> {
+        let mut cert_chain = ServerCertificate::with_context(&[]);
+        for der in chain {
+            cert_chain.add(CertificateEntryRef::X509(der)).unwrap();
+        }
+
+        let mut verifier =
+            CertVerifier::<Aes128GcmSha256, SystemTime, 4096>::new(Certificate::X509(ca));
+        verifier.set_hostname_verification("localhost")?;
+        verifier.verify_certificate(&sha2::Sha256::new(), cert_chain)
+    }
+
+    // The server sends [server_cert, intermediate].
+    //
+    // - server_cert is signed by intermediate.
+    // - intermediate is signed by the configured CA.
+    //
+    // This is a happy-path test, that we can validate a valid cert chain.
+    #[test]
+    fn server_cert_and_intermediate_are_accepted() {
+        let server_cert = pem_parser::pem_to_der(include_str!("../tests/data/im-server-cert.pem"));
+        let intermediate = pem_parser::pem_to_der(include_str!("../tests/data/im-cert.pem"));
+        let ca = pem_parser::pem_to_der(include_str!("../tests/data/ca-cert.pem"));
+
+        let result = verify(&ca, &[&server_cert, &intermediate]);
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    // The server sends [server_cert, intermediate, cross-signed CA].
+    //
+    // - server_cert is signed by intermediate.
+    // - intermediate is signed by the configured CA.
+    //
+    // At the end of the operation, the list of trusted certs is [ca, intermediate].
+    //
+    // This test ensures that the cross-signed CA is safely ignored by the verifier.
+    #[test]
+    fn extra_cross_signed_ca_is_ignored() {
+        let server_cert = pem_parser::pem_to_der(include_str!("../tests/data/im-server-cert.pem"));
+        let intermediate = pem_parser::pem_to_der(include_str!("../tests/data/im-cert.pem"));
+        let cross_signed_ca =
+            pem_parser::pem_to_der(include_str!("../tests/data/ca-cross-signed-cert.pem"));
+        let ca = pem_parser::pem_to_der(include_str!("../tests/data/ca-cert.pem"));
+
+        let result = verify(&ca, &[&server_cert, &intermediate, &cross_signed_ca]);
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    // The server sends [server_cert, other_root, client_cert, intermediate].
+    //
+    // - server_cert is signed by intermediate.
+    // - intermediate is signed by the configured CA.
+    // - other_root and client_cert are what RFC 9846 calls "extraneous", not needed to reach the CA.
+    //
+    // At the end of the operation, the list of trusted certs is
+    // [ca, client_cert, intermediate].
+    //
+    // This test ensures that extraneous certificates, in any order, do not break cert verification.
+    #[test]
+    fn extraneous_intermediates_are_ignored() {
+        let server_cert = pem_parser::pem_to_der(include_str!("../tests/data/im-server-cert.pem"));
+        let intermediate = pem_parser::pem_to_der(include_str!("../tests/data/im-cert.pem"));
+        let other_root = pem_parser::pem_to_der(include_str!("../tests/data/other-root-cert.pem"));
+        let client_cert = pem_parser::pem_to_der(include_str!("../tests/data/client-cert.pem"));
+        let ca = pem_parser::pem_to_der(include_str!("../tests/data/ca-cert.pem"));
+
+        let result = verify(&ca, &[&server_cert, &other_root, &client_cert, &intermediate]);
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    // The server sends [server_cert, garbage, intermediate].
+    //
+    // - server_cert is signed by intermediate.
+    // - garbage is invalid DER and cannot be decoded at all.
+    // - intermediate is signed by the configured CA.
+    //
+    // This test ensures that a cert we cannot parse is ignored, for robustness.
+    #[test]
+    fn unparsable_certificate_is_ignored() {
+        let server_cert = pem_parser::pem_to_der(include_str!("../tests/data/im-server-cert.pem"));
+        let intermediate = pem_parser::pem_to_der(include_str!("../tests/data/im-cert.pem"));
+        let garbage = b"this is not a certificate";
+        let ca = pem_parser::pem_to_der(include_str!("../tests/data/ca-cert.pem"));
+
+        let result = verify(&ca, &[&server_cert, garbage, &intermediate]);
+        assert!(result.is_ok(), "{:?}", result.err());
+    }
+
+    // The server sends [server_cert, intermediate].
+    //
+    // We trust other_ca, and nothing chains up to it.
+    // Therefore verification must fail.
+    #[test]
+    fn chain_that_does_not_reach_the_ca_is_rejected() {
+        let server_cert = pem_parser::pem_to_der(include_str!("../tests/data/im-server-cert.pem"));
+        let intermediate = pem_parser::pem_to_der(include_str!("../tests/data/im-cert.pem"));
+        let other_ca = pem_parser::pem_to_der(include_str!("../tests/data/other-root-cert.pem"));
+
+        let result = verify(&other_ca, &[&server_cert, &intermediate]);
+        assert!(matches!(result, Err(TlsError::InvalidCertificate)));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::tls_hostname_match_impl;
