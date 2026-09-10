@@ -4,13 +4,16 @@ use crate::extensions::messages::CertificateExtension;
 use crate::parse_buffer::ParseBuffer;
 use heapless::Vec;
 
+/// The maximum number of certificates in a Certificate message.
+pub const MAX_CERTIFICATE_ENTRIES: usize = 16;
+
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct CertificateRef<'a> {
     raw_entries: &'a [u8],
     request_context: &'a [u8],
 
-    pub entries: Vec<CertificateEntryRef<'a>, 16>,
+    pub entries: Vec<CertificateEntryRef<'a>, MAX_CERTIFICATE_ENTRIES>,
 }
 
 impl<'a> CertificateRef<'a> {
