@@ -15,8 +15,14 @@
 ```
 use embedded_tls::*;
 use embedded_io_adapters::tokio_1::FromTokio;
-use rand::rngs::OsRng;
 use tokio::net::TcpStream;
+
+// All cryptography is served by `embassy-crypto` drivers, resolved at link time.
+// Link a crate providing the primitives (here the software implementations in
+// `embassy-crypto-rustcrypto`) and one registering a random number generator (here
+// the operating system's, from `embassy-crypto-rand`; embedded HALs provide their own).
+use embassy_crypto_rand as _;
+use embassy_crypto_rustcrypto as _;
 
 #[tokio::main]
 async fn main() {
@@ -28,20 +34,18 @@ async fn main() {
     let mut read_record_buffer = [0; 16384];
     let mut write_record_buffer = [0; 16384];
     let config = TlsConfig::new().with_server_name("google.com").enable_rsa_signatures();
-    let mut tls = TlsConnection::new(
+    let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
         FromTokio::new(stream),
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
 
-    // Allows disabling cert verification, in case you are using PSK and don't need it, or are just testing.
-    // otherwise, use embedded_tls::webpki::CertVerifier, which only works on std for now.
-    tls.open(TlsContext::new(
-        &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ))
-    .await
-    .expect("error establishing TLS connection");
+    // By default the server certificate is not verified, which is fine when using PSK or
+    // when just testing. Otherwise, pass a verifier such as `embedded_tls::webpki::CertVerifier`
+    // (std only) or `embedded_tls::pki::CertVerifier` with `TlsContext::with_verifier`.
+    tls.open(TlsContext::new(&config))
+        .await
+        .expect("error establishing TLS connection");
 
     println!("TLS session opened");
 }
@@ -62,7 +66,7 @@ mod common;
 mod config;
 mod connection;
 mod content_types;
-mod crypto_engine;
+pub mod crypto;
 mod extensions;
 pub mod flush_policy;
 mod handshake;
@@ -73,10 +77,9 @@ mod record;
 mod record_reader;
 mod write_buffer;
 
-pub use config::UnsecureProvider;
+pub use embassy_crypto;
 pub use extensions::extension_data::signature_algorithms::SignatureScheme;
 pub use handshake::certificate_verify::CertificateVerify;
-pub use rand_core::{CryptoRng, CryptoRngCore};
 
 #[cfg(feature = "webpki")]
 pub mod webpki;
@@ -169,3 +172,11 @@ mod stdlib {
 ///
 /// All calls to this should be removed before 1.x.
 fn unused<T>(_: T) {}
+
+/// Drivers for the crate's own unit tests: the software `embassy-crypto` drivers and the
+/// operating system random number generator.
+#[cfg(test)]
+mod test_drivers {
+    use embassy_crypto_rand as _;
+    use embassy_crypto_rustcrypto as _;
+}

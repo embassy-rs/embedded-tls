@@ -1,5 +1,6 @@
 use crate::TlsError;
 use crate::config::{Certificate, TlsCipherSuite, TlsClock, TlsVerifier};
+use crate::crypto::{TlsHash, certificate_verify_message};
 use crate::extensions::extension_data::signature_algorithms::SignatureScheme;
 use crate::handshake::{
     certificate::{
@@ -8,8 +9,6 @@ use crate::handshake::{
     certificate_verify::CertificateVerifyRef,
 };
 use core::marker::PhantomData;
-use digest::Digest;
-use heapless::Vec;
 #[cfg(all(not(feature = "alloc"), feature = "webpki"))]
 impl TryInto<&'static webpki::SignatureAlgorithm> for SignatureScheme {
     type Error = TlsError;
@@ -173,13 +172,10 @@ where
 
     fn verify_signature(&mut self, verify: CertificateVerifyRef) -> Result<(), TlsError> {
         let handshake_hash = unwrap!(self.certificate_transcript.take());
-        let ctx_str = b"TLS 1.3, server CertificateVerify\x00";
-        let mut msg: Vec<u8, 130> = Vec::new();
-        msg.resize(64, 0x20).map_err(|_| TlsError::EncodeError)?;
-        msg.extend_from_slice(ctx_str)
-            .map_err(|_| TlsError::EncodeError)?;
-        msg.extend_from_slice(&handshake_hash.finalize())
-            .map_err(|_| TlsError::EncodeError)?;
+        let msg = certificate_verify_message(
+            b"TLS 1.3, server CertificateVerify\x00",
+            handshake_hash.finalize().as_ref(),
+        )?;
 
         let certificate = unwrap!(self.certificate.as_ref()).try_into()?;
         verify_signature(&msg[..], &certificate, &verify)?;

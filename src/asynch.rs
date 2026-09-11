@@ -92,19 +92,16 @@ where
     ///
     /// Returns an error if the handshake does not proceed. If an error occurs, the connection
     /// instance must be recreated.
-    pub async fn open<Provider>(
+    pub async fn open<Verifier>(
         &mut self,
-        mut context: TlsContext<'_, Provider>,
+        mut context: TlsContext<'_, Verifier>,
     ) -> Result<(), TlsError>
     where
-        Provider: CryptoProvider<CipherSuite = CipherSuite>,
+        Verifier: TlsVerifier<CipherSuite>,
     {
         let mut handshake: Handshake<CipherSuite> = Handshake::new();
-        if let (Ok(verifier), Some(server_name)) = (
-            context.crypto_provider.verifier(),
-            context.config.server_name,
-        ) {
-            verifier.set_hostname_verification(server_name)?;
+        if let Some(server_name) = context.config.server_name {
+            context.verifier.set_hostname_verification(server_name)?;
         }
         let mut state = State::ClientHello;
 
@@ -116,8 +113,7 @@ where
                     &mut self.record_reader,
                     &mut self.record_write_buf,
                     &mut self.key_schedule,
-                    context.config,
-                    &mut context.crypto_provider,
+                    &mut context,
                 )
                 .await?;
             trace!("State {:?} -> {:?}", state, next_state);

@@ -1,6 +1,6 @@
-//use p256::elliptic_curve::AffinePoint;
 use crate::TlsError;
 use crate::config::TlsCipherSuite;
+use crate::crypto::TlsHash;
 use crate::handshake::certificate::CertificateRef;
 use crate::handshake::certificate_request::CertificateRequestRef;
 use crate::handshake::certificate_verify::{CertificateVerify, CertificateVerifyRef};
@@ -9,11 +9,9 @@ use crate::handshake::encrypted_extensions::EncryptedExtensions;
 use crate::handshake::finished::Finished;
 use crate::handshake::new_session_ticket::NewSessionTicket;
 use crate::handshake::server_hello::ServerHello;
-use crate::key_schedule::HashOutputSize;
 use crate::parse_buffer::{ParseBuffer, ParseError};
 use crate::{buffer::CryptoBuffer, key_schedule::WriteKeySchedule};
 use core::fmt::{Debug, Formatter};
-use sha2::Digest;
 
 pub mod binder;
 pub mod certificate;
@@ -72,7 +70,7 @@ where
     ClientCert(CertificateRef<'a>),
     ClientCertVerify(CertificateVerify),
     ClientHello(ClientHello<'config, CipherSuite>),
-    Finished(Finished<HashOutputSize<CipherSuite>>),
+    Finished(Finished<CipherSuite::Hash>),
 }
 
 impl<CipherSuite> ClientHandshake<'_, '_, CipherSuite>
@@ -134,7 +132,7 @@ pub enum ServerHandshake<'a, CipherSuite: TlsCipherSuite> {
     Certificate(CertificateRef<'a>),
     CertificateRequest(CertificateRequestRef<'a>),
     CertificateVerify(CertificateVerifyRef<'a>),
-    Finished(Finished<HashOutputSize<CipherSuite>>),
+    Finished(Finished<CipherSuite::Hash>),
 }
 
 impl<CipherSuite: TlsCipherSuite> ServerHandshake<'_, CipherSuite> {
