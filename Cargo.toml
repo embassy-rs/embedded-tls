@@ -12,7 +12,7 @@ keywords = ["embedded", "async", "tls", "no_std", "network"]
 exclude = [".github"]
 
 [package.metadata.docs.rs]
-features = ["webpki", "rustpki", "rsa", "ed25519", "p384"]
+features = ["webpki", "rustpki", "rsa", "ed25519", "p384", "x25519", "mlkem"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
