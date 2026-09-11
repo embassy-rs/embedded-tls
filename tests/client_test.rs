@@ -1,9 +1,10 @@
-#![macro_use]
+//#![macro_use]
 use embedded_io::BufRead as _;
 use embedded_io_adapters::{std::FromStd, tokio_1::FromTokio};
 use embedded_io_async::BufRead as _;
 use embedded_io_async::Write;
-use rand::rngs::OsRng;
+use rand::rngs::SysRng;
+use rand_core::UnwrapErr;
 use std::net::SocketAddr;
 use std::sync::Once;
 
@@ -46,6 +47,8 @@ async fn test_google() {
     use embedded_tls::*;
     use tokio::net::TcpStream;
 
+    let rng = UnwrapErr(SysRng);
+
     init_log();
 
     let stream = TcpStream::connect("google.com:443")
@@ -53,8 +56,8 @@ async fn test_google() {
         .expect("error connecting to server");
 
     log::info!("Connected");
-    let mut read_record_buffer = [0; 16384];
-    let mut write_record_buffer = [0; 16384];
+    let mut read_record_buffer = [0; 16640];
+    let mut write_record_buffer = [0; 16640];
     let config = TlsConfig::new().with_server_name("google.com");
 
     let mut tls = TlsConnection::new(
@@ -65,7 +68,7 @@ async fn test_google() {
 
     let open_fut = tls.open(TlsContext::new(
         &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
+        UnsecureProvider::new::<Aes128GcmSha256>(rng),
     ));
     log::info!("SIZE of open fut is {}", core::mem::size_of_val(&open_fut));
     open_fut.await.expect("error establishing TLS connection");
@@ -76,7 +79,7 @@ async fn test_google() {
         .expect("error writing data");
     tls.flush().await.expect("error flushing data");
 
-    let mut rx_buf = [0; 4096];
+    let mut rx_buf = [0; 16640];
     let sz = tls.read(&mut rx_buf).await.expect("error reading data");
     log::info!("Read {} bytes: {:?}", sz, &rx_buf[..sz]);
 
@@ -90,15 +93,16 @@ async fn test_google() {
 async fn test_ping() {
     use embedded_tls::*;
     use tokio::net::TcpStream;
-    let addr = setup();
 
+    let rng = UnwrapErr(SysRng);
+    let addr = setup();
     let stream = TcpStream::connect(addr)
         .await
         .expect("error connecting to server");
 
     log::info!("Connected");
-    let mut read_record_buffer = [0; 16384];
-    let mut write_record_buffer = [0; 16384];
+    let mut read_record_buffer = [0; 16640];
+    let mut write_record_buffer = [0; 16640];
     let config = TlsConfig::new().with_server_name("localhost");
 
     let mut tls = TlsConnection::new(
@@ -111,7 +115,7 @@ async fn test_ping() {
 
     let open_fut = tls.open(TlsContext::new(
         &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
+        UnsecureProvider::new::<Aes128GcmSha256>(rng),
     ));
     log::info!("SIZE of open fut is {}", core::mem::size_of_val(&open_fut));
     open_fut.await.expect("error establishing TLS connection");
@@ -155,15 +159,16 @@ async fn test_ping() {
 async fn test_ping_nocopy() {
     use embedded_tls::*;
     use tokio::net::TcpStream;
-    let addr = setup();
 
+    let rng = UnwrapErr(SysRng);
+    let addr = setup();
     let stream = TcpStream::connect(addr)
         .await
         .expect("error connecting to server");
 
     log::info!("Connected");
-    let mut read_record_buffer = [0; 16384];
-    let mut write_record_buffer = [0; 16384];
+    let mut read_record_buffer = [0; 16640];
+    let mut write_record_buffer = [0; 16640];
     let config = TlsConfig::new().with_server_name("localhost");
 
     let mut tls = TlsConnection::new(
@@ -176,7 +181,7 @@ async fn test_ping_nocopy() {
 
     let open_fut = tls.open(TlsContext::new(
         &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
+        UnsecureProvider::new::<Aes128GcmSha256>(rng),
     ));
     log::info!("SIZE of open fut is {}", core::mem::size_of_val(&open_fut));
     open_fut.await.expect("error establishing TLS connection");
@@ -223,15 +228,15 @@ async fn test_ping_nocopy_bufread() {
     use embedded_tls::*;
     use tokio::net::TcpStream;
 
+    let rng = UnwrapErr(SysRng);
     let addr = setup();
-
     let stream = TcpStream::connect(addr)
         .await
         .expect("error connecting to server");
 
     log::info!("Connected");
-    let mut read_record_buffer = [0; 16384];
-    let mut write_record_buffer = [0; 16384];
+    let mut read_record_buffer = [0; 16640];
+    let mut write_record_buffer = [0; 16640];
     let config = TlsConfig::new().with_server_name("localhost");
 
     let mut tls = TlsConnection::new(
@@ -241,7 +246,7 @@ async fn test_ping_nocopy_bufread() {
     );
     tls.open(TlsContext::new(
         &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
+        UnsecureProvider::new::<Aes128GcmSha256>(rng),
     ))
     .await
     .expect("error establishing TLS connection");
@@ -269,12 +274,13 @@ fn test_blocking_ping() {
     use embedded_tls::blocking::*;
     use std::net::TcpStream;
 
+    let rng = UnwrapErr(SysRng);
     let addr = setup();
     let stream = TcpStream::connect(addr).expect("error connecting to server");
 
     log::info!("Connected");
-    let mut read_record_buffer = [0; 16384];
-    let mut write_record_buffer = [0; 16384];
+    let mut read_record_buffer = [0; 16640];
+    let mut write_record_buffer = [0; 16640];
     let config = TlsConfig::new().with_server_name("localhost");
 
     let mut tls: TlsConnection<FromStd<TcpStream>, Aes128GcmSha256> = TlsConnection::new(
@@ -284,7 +290,7 @@ fn test_blocking_ping() {
     );
     tls.open(TlsContext::new(
         &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
+        UnsecureProvider::new::<Aes128GcmSha256>(rng),
     ))
     .expect("error establishing TLS connection");
     log::info!("Established");
@@ -318,12 +324,13 @@ fn test_blocking_ping_nocopy() {
     use embedded_tls::blocking::*;
     use std::net::TcpStream;
 
+    let rng = UnwrapErr(SysRng);
     let addr = setup();
     let stream = TcpStream::connect(addr).expect("error connecting to server");
 
     log::info!("Connected");
-    let mut read_record_buffer = [0; 16384];
-    let mut write_record_buffer = [0; 16384];
+    let mut read_record_buffer = [0; 16640];
+    let mut write_record_buffer = [0; 16640];
     let config = TlsConfig::new().with_server_name("localhost");
 
     let mut tls: TlsConnection<FromStd<TcpStream>, Aes128GcmSha256> = TlsConnection::new(
@@ -333,7 +340,7 @@ fn test_blocking_ping_nocopy() {
     );
     tls.open(TlsContext::new(
         &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
+        UnsecureProvider::new::<Aes128GcmSha256>(rng),
     ))
     .expect("error establishing TLS connection");
     log::info!("Established");
@@ -361,12 +368,13 @@ fn test_blocking_ping_nocopy_bufread() {
     use embedded_tls::blocking::*;
     use std::net::TcpStream;
 
+    let rng = UnwrapErr(SysRng);
     let addr = setup();
     let stream = TcpStream::connect(addr).expect("error connecting to server");
 
     log::info!("Connected");
-    let mut read_record_buffer = [0; 16384];
-    let mut write_record_buffer = [0; 16384];
+    let mut read_record_buffer = [0; 16640];
+    let mut write_record_buffer = [0; 16640];
     let config = TlsConfig::new().with_server_name("localhost");
 
     let mut tls: TlsConnection<FromStd<TcpStream>, Aes128GcmSha256> = TlsConnection::new(
@@ -376,7 +384,7 @@ fn test_blocking_ping_nocopy_bufread() {
     );
     tls.open(TlsContext::new(
         &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
+        UnsecureProvider::new::<Aes128GcmSha256>(rng),
     ))
     .expect("error establishing TLS connection");
     log::info!("Established");

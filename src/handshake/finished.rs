@@ -1,24 +1,23 @@
+use digest::array::{Array, ArraySize};
+
 use crate::TlsError;
 use crate::buffer::CryptoBuffer;
 use crate::parse_buffer::ParseBuffer;
 use core::fmt::{Debug, Formatter};
-//use digest::generic_array::{ArrayLength, GenericArray};
-use generic_array::{ArrayLength, GenericArray};
-// use heapless::Vec;
 
-pub struct Finished<N: ArrayLength<u8>> {
-    pub verify: GenericArray<u8, N>,
-    pub hash: Option<GenericArray<u8, N>>,
+pub struct Finished<N: ArraySize> {
+    pub verify: Array<u8, N>,
+    pub hash: Option<Array<u8, N>>,
 }
 
 #[cfg(feature = "defmt")]
-impl<N: ArrayLength<u8>> defmt::Format for Finished<N> {
+impl<N: ArraySize> defmt::Format for Finished<N> {
     fn format(&self, f: defmt::Formatter<'_>) {
         defmt::write!(f, "verify length:{}", &self.verify.len());
     }
 }
 
-impl<N: ArrayLength<u8>> Debug for Finished<N> {
+impl<N: ArraySize> Debug for Finished<N> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Finished")
             .field("verify", &self.hash)
@@ -26,10 +25,10 @@ impl<N: ArrayLength<u8>> Debug for Finished<N> {
     }
 }
 
-impl<N: ArrayLength<u8>> Finished<N> {
+impl<N: ArraySize> Finished<N> {
     pub fn parse(buf: &mut ParseBuffer, _len: u32) -> Result<Self, TlsError> {
         // info!("finished len: {}", len);
-        let mut verify = GenericArray::default();
+        let mut verify = Array::default();
         buf.fill(&mut verify)?;
         //let hash = GenericArray::from_slice()
         //let hash: Result<Vec<u8, _>, ()> = buf

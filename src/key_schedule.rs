@@ -1,23 +1,22 @@
+use digest::OutputSizeUser;
+use digest::array::{Array, ArraySize};
+use digest::typenum::Unsigned;
+use hmac::{KeyInit, Mac, SimpleHmac};
+use sha2::Digest;
+
 use crate::handshake::binder::PskBinder;
 use crate::handshake::finished::Finished;
 use crate::{TlsError, config::TlsCipherSuite};
-use digest::OutputSizeUser;
-use digest::generic_array::ArrayLength;
-use hmac::{Mac, SimpleHmac};
-use sha2::Digest;
-use sha2::digest::generic_array::{GenericArray, typenum::Unsigned};
 
 pub type HashOutputSize<CipherSuite> =
     <<CipherSuite as TlsCipherSuite>::Hash as OutputSizeUser>::OutputSize;
+pub type LabelBufferSize<CipherSuite> = <CipherSuite as TlsCipherSuite>::LabelBufferSize;
 
-pub type IvArray<CipherSuite> = GenericArray<u8, <CipherSuite as TlsCipherSuite>::IvLen>;
-pub type KeyArray<CipherSuite> = GenericArray<u8, <CipherSuite as TlsCipherSuite>::KeyLen>;
-pub type HashArray<CipherSuite> = GenericArray<u8, HashOutputSize<CipherSuite>>;
+pub type IvArray<CipherSuite> = Array<u8, <CipherSuite as TlsCipherSuite>::IvLen>;
+pub type KeyArray<CipherSuite> = Array<u8, <CipherSuite as TlsCipherSuite>::KeyLen>;
+pub type HashArray<CipherSuite> = Array<u8, HashOutputSize<CipherSuite>>;
 
-type Hkdf<CipherSuite> = hkdf::Hkdf<
-    <CipherSuite as TlsCipherSuite>::Hash,
-    SimpleHmac<<CipherSuite as TlsCipherSuite>::Hash>,
->;
+type Hkdf<CipherSuite> = hkdf::GenericHkdf<SimpleHmac<<CipherSuite as TlsCipherSuite>::Hash>>;
 
 enum Secret<CipherSuite>
 where
@@ -42,47 +41,43 @@ where
         }
     }
 
-    fn make_expanded_hkdf_label<N: ArrayLength<u8>>(
+    fn make_expanded_hkdf_label<N: ArraySize>(
         &self,
         label: &[u8],
         context_type: ContextType<CipherSuite>,
-    ) -> Result<GenericArray<u8, N>, TlsError> {
+    ) -> Result<Array<u8, N>, TlsError> {
+        fn copy_slice(dest: &mut [u8], src: &[u8]) -> usize {
+            let len = src.len();
+            dest[..len].copy_from_slice(src);
+            len
+        }
+
         //info!("make label {:?} {}", label, len);
-        // Max label buffer: hash_output (up to 48 for SHA-384) + 12 (longest label) + 10 (overhead) = 70
-        let mut hkdf_label = heapless::Vec::<u8, 70>::new();
-        hkdf_label
-            .extend_from_slice(&N::to_u16().to_be_bytes())
-            .map_err(|_| TlsError::InternalError)?;
+
+        let mut hkdf_label = Array::<u8, LabelBufferSize<CipherSuite>>::from_fn(|_| 0);
+        let mut i = 0;
+
+        i += copy_slice(&mut hkdf_label[i..], &N::to_u16().to_be_bytes());
 
         let label_len = 6 + label.len() as u8;
-        hkdf_label
-            .extend_from_slice(&label_len.to_be_bytes())
-            .map_err(|_| TlsError::InternalError)?;
-        hkdf_label
-            .extend_from_slice(b"tls13 ")
-            .map_err(|_| TlsError::InternalError)?;
-        hkdf_label
-            .extend_from_slice(label)
-            .map_err(|_| TlsError::InternalError)?;
+        i += copy_slice(&mut hkdf_label[i..], &label_len.to_be_bytes());
+        i += copy_slice(&mut hkdf_label[i..], b"tls13 ");
+        i += copy_slice(&mut hkdf_label[i..], label);
 
         match context_type {
             ContextType::None => {
-                hkdf_label.push(0).map_err(|_| TlsError::InternalError)?;
+                i += copy_slice(&mut hkdf_label[i..], &[0]);
             }
             ContextType::Hash(context) => {
-                hkdf_label
-                    .extend_from_slice(&(context.len() as u8).to_be_bytes())
-                    .map_err(|_| TlsError::InternalError)?;
-                hkdf_label
-                    .extend_from_slice(&context)
-                    .map_err(|_| TlsError::InternalError)?;
+                i += copy_slice(&mut hkdf_label[i..], &[context.len() as u8]);
+                i += copy_slice(&mut hkdf_label[i..], &context);
             }
         }
 
-        let mut okm = GenericArray::default();
+        let mut okm = Array::default();
         //info!("label {:x?}", label);
         self.as_ref()?
-            .expand(&hkdf_label, &mut okm)
+            .expand(&hkdf_label[..i], &mut okm)
             .map_err(|_| TlsError::CryptoError)?;
         //info!("expand {:x?}", okm);
         Ok(okm)
@@ -103,7 +98,7 @@ where
 {
     fn new() -> Self {
         Self {
-            secret: GenericArray::default(),
+            secret: Array::default(),
             hkdf: Secret::Uninitialized,
         }
     }
@@ -300,7 +295,7 @@ where
         //info!("counter = {:x?}", counter);
         // info!("iv = {:x?}", iv);
 
-        let mut nonce = GenericArray::default();
+        let mut nonce = Array::default();
 
         for (index, (l, r)) in iv[0..CipherSuite::IvLen::to_usize()]
             .iter()
@@ -315,9 +310,9 @@ where
         nonce
     }
 
-    fn pad<N: ArrayLength<u8>>(input: &[u8]) -> GenericArray<u8, N> {
+    fn pad<N: ArraySize>(input: &[u8]) -> Array<u8, N> {
         // info!("padding input = {:x?}", input);
-        let mut padded = GenericArray::default();
+        let mut padded = Array::default();
         for (index, byte) in input.iter().rev().enumerate() {
             /*info!(
                 "{} pad {}={:x?}",
@@ -331,7 +326,7 @@ where
     }
 
     fn zero() -> HashArray<CipherSuite> {
-        GenericArray::default()
+        Array::default()
     }
 
     // Initializes the early secrets with a callback for any PSK binders

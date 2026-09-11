@@ -1,12 +1,13 @@
-use ecdsa::elliptic_curve::SecretKey;
 use embedded_io_adapters::tokio_1::FromTokio;
 use embedded_tls::{Certificate, CryptoProvider, SignatureScheme};
+use p256::SecretKey;
 use p256::ecdsa::SigningKey;
-use rand::rngs::OsRng;
-use rand_core::CryptoRngCore;
-use rustls::server::AllowAnyAuthenticatedClient;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+use rand_core::CryptoRng;
+use rustls::server::WebPkiClientVerifier;
 use std::net::SocketAddr;
-use std::sync::Once;
+use std::sync::{Arc, Once};
 
 mod tlsserver;
 
@@ -34,8 +35,6 @@ fn setup() -> SocketAddr {
         std::thread::spawn(move || {
             use tlsserver::*;
 
-            let versions = &[&rustls::version::TLS13];
-
             let test_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
 
             let ca = load_certs(&test_dir.join("data").join("ca-cert.pem"));
@@ -43,18 +42,17 @@ fn setup() -> SocketAddr {
             let privkey = load_private_key(&test_dir.join("data").join("server-key.pem"));
 
             let mut client_auth_roots = rustls::RootCertStore::empty();
-            for root in ca.iter() {
+            for root in ca.into_iter() {
                 client_auth_roots.add(root).unwrap()
             }
 
-            let client_cert_verifier = AllowAnyAuthenticatedClient::new(client_auth_roots);
+            let client_cert_verifier = WebPkiClientVerifier::builder(Arc::new(client_auth_roots))
+                .allow_unauthenticated()
+                .build()
+                .unwrap();
 
             let config = rustls::ServerConfig::builder()
-                .with_cipher_suites(rustls::ALL_CIPHER_SUITES)
-                .with_kx_groups(&rustls::ALL_KX_GROUPS)
-                .with_protocol_versions(versions)
-                .unwrap()
-                .with_client_cert_verifier(client_cert_verifier.boxed())
+                .with_client_cert_verifier(client_cert_verifier)
                 .with_single_cert(certs, privkey)
                 .unwrap();
 
@@ -69,7 +67,7 @@ fn setup() -> SocketAddr {
 }
 
 struct Provider<'a> {
-    rng: OsRng,
+    rng: StdRng,
     priv_key: &'a [u8],
     client_cert: Option<Certificate<&'a [u8]>>,
 }
@@ -78,13 +76,13 @@ impl CryptoProvider for Provider<'_> {
     type CipherSuite = embedded_tls::Aes128GcmSha256;
     type Signature = p256::ecdsa::DerSignature;
 
-    fn rng(&mut self) -> impl CryptoRngCore {
+    fn rng(&mut self) -> impl CryptoRng {
         &mut self.rng
     }
 
     fn signer(
         &mut self,
-    ) -> Result<(impl signature::SignerMut<Self::Signature>, SignatureScheme), embedded_tls::TlsError>
+    ) -> Result<(impl signature::Signer<Self::Signature>, SignatureScheme), embedded_tls::TlsError>
     {
         let secret_key = SecretKey::from_sec1_der(self.priv_key)
             .map_err(|_| embedded_tls::TlsError::InvalidPrivateKey)?;
@@ -130,7 +128,7 @@ async fn test_client_certificate_auth() {
     log::info!("SIZE of connection is {}", core::mem::size_of_val(&tls));
 
     let mut provider = Provider {
-        rng: OsRng,
+        rng: StdRng::from_seed([0xABu8; 32]),
         priv_key: &private_key_der,
         client_cert: Some(Certificate::X509(&client_cert_der)),
     };

@@ -12,32 +12,34 @@ keywords = ["embedded", "async", "tls", "no_std", "network"]
 exclude = [".github"]
 
 [package.metadata.docs.rs]
-features = ["webpki", "rustpki", "rsa", "ed25519", "p384"]
+features = ["webpki", "rustpki", "rsa", "ed25519", "p384", "x25519", "mlkem"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-portable-atomic = { version = "1.6.0", default-features = false }
-p256 = { version = "0.13", default-features = false, features = [ "ecdh", "ecdsa", "sha256" ] }
-p384 = { version = "0.13", default-features = false, features = [ "ecdsa", "sha384" ], optional = true }
-ed25519-dalek = { version = "2.2", default-features = false, optional = true }
-rsa = { version = "0.9.9", default-features = false, features = ["sha2"], optional = true }
-rand_core = { version = "0.6.3", default-features = false }
-hkdf = "0.12.3"
-hmac = "0.12.1"
-sha2 = { version = "0.10.2", default-features = false }
-aes-gcm = { version = "0.10.1", default-features = false, features = ["aes"] }
-digest = { version = "0.10.3", default-features = false, features = [ "core-api" ] }
-typenum = { version = "1.15.0", default-features = false }
-heapless = { version = "0.9", default-features = false }
+portable-atomic = { version = "1.15.0", default-features = false }
+p256 = { version = "0.14.0", default-features = false, features = [ "ecdh", "ecdsa", "sha256", "pkcs8" ] }
+p384 = { version = "0.14.0", default-features = false, features = [ "ecdsa", "sha384", "pkcs8" ], optional = true }
+ed25519-dalek = { version = "3.0", default-features = false, optional = true }
+x25519-dalek = { version = "3.0", default-features = false, features = ["static_secrets"], optional = true }
+rsa = { version = "0.10.0-rc.18", default-features = false, features = ["sha2", "encoding"], optional = true }
+rand_core = { version = "0.10.1", default-features = false }
+hkdf = "0.13"
+hmac = "0.13"
+sha2 = { version = "0.11", default-features = false }
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes"] }
+digest = { version = "0.11.2", default-features = false }
+typenum = { version = "1.20.1", default-features = false }
+heapless = { version = "0.9.3", default-features = false }
 embedded-io = "0.7"
 embedded-io-async = "0.7"
 embedded-io-adapters = { version = "0.7", optional = true }
-generic-array = { version = "0.14", default-features = false }
-webpki = { package = "rustls-webpki", version = "0.101.7", default-features = false, optional = true }
-const-oid = { version = "0.10.1", optional = true }
-der = { version = "0.8.1", features = ["derive", "oid", "heapless"], optional = true }
-signature = { version = "2.2", default-features = false }
-ecdsa = { version = "0.16.9", default-features = false }
+webpki = { package = "rustls-webpki", version = "0.101", default-features = false, optional = true }
+const-oid = { version = "0.10.2", optional = true }
+der = { version = "0.8.2", features = ["derive", "oid", "time", "heapless"], optional = true }
+signature = { version = "3.0.0", default-features = false }
+ecdsa = { version = "0.17.0", default-features = false }
+dhkem = { version = "0.1.0", default-features = false, optional = true }
+ml-kem = { version = "0.3.2", default-features = false, optional = true }
 
 # Logging alternatives
 log = { version = "0.4", optional = true }
@@ -46,23 +48,34 @@ defmt = { version = "1.0.1", optional = true }
 [dev-dependencies]
 env_logger = "0.11"
 tokio = { version = "1", features = ["full"] }
-mio = { version = "0.8.3", features = ["os-poll", "net"] }
-rustls = "0.21.6"
-rustls-pemfile = "1.0"
+mio = { version = "1.2.0", features = ["os-poll", "net"] }
+rustls = "0.23.40"
+rustls-pemfile = "2.2.0"
 serde = { version = "1.0", features = ["derive"] }
-rand = "0.8"
+rand = "0.10.1"
 log = "0.4"
 pem-parser = "0.1.1"
 openssl = "0.10.44"
 
 [features]
-default = ["std", "log", "tokio"]
+default = ["std", "log", "tokio", "rustpki", "rsa", "mlkem"]
 defmt = ["dep:defmt", "embedded-io/defmt", "heapless/defmt"]
 std = ["embedded-io/std", "embedded-io-async/std"]
 tokio = ["embedded-io-adapters/tokio-1"]
 alloc = []
+## Old pki derived on rustls. Missing some features. Needs alloc. Mutually exclusive with rustpki.
 webpki = ["dep:webpki"]
+## New pki. More features. Mutually exclusive with webpki.
 rustpki = ["dep:der","dep:const-oid"]
+## Enables use of RSA in certificates, needs rustpki and alloc
 rsa = ["dep:rsa", "rustpki", "alloc"]
+## Enables use of Ed25519 in certificates, needs rustpki
 ed25519 = ["dep:ed25519-dalek", "rustpki"]
+## Adds X25519 to DH-groups
+x25519 = ["dep:x25519-dalek"]
+## Enables use of NIST P-384 in certificates, needs rustpki
 p384 = ["dep:p384", "rustpki"]
+## Enables PQC ML-Kem key-exchange
+## - adds X25519MlKem768 to DH-groups if feature x25519 is also chosen
+## - adds Secp256r1MlKem768 to DH-groups otherwise
+mlkem = ["dep:dhkem", "dep:ml-kem"]

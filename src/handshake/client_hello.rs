@@ -1,14 +1,20 @@
 use core::marker::PhantomData;
-
 use digest::{Digest, OutputSizeUser};
 use heapless::Vec;
-use p256::EncodedPoint;
-use p256::ecdh::EphemeralSecret;
-use p256::elliptic_curve::rand_core::RngCore;
+#[cfg(feature = "mlkem")]
+use ml_kem::{KeyExport, MlKem768, kem::Kem};
+#[cfg(not(feature = "x25519"))]
+use p256::elliptic_curve::Generate;
+#[cfg(not(feature = "x25519"))]
+use p256::{NistP256, ecdh::EphemeralSecret, elliptic_curve::sec1::Sec1Point};
+use rand_core::Rng;
 use typenum::Unsigned;
+#[cfg(feature = "x25519")]
+use x25519_dalek::EphemeralSecret;
 
 use crate::TlsError;
 use crate::config::{TlsCipherSuite, TlsConfig};
+use crate::connection::KeyExchangeSecret;
 use crate::extensions::extension_data::alpn::AlpnProtocolNameList;
 use crate::extensions::extension_data::key_share::{KeyShareClientHello, KeyShareEntry};
 use crate::extensions::extension_data::pre_shared_key::PreSharedKeyClientHello;
@@ -31,7 +37,7 @@ where
     pub(crate) config: &'config TlsConfig<'config>,
     random: Random,
     cipher_suite: PhantomData<CipherSuite>,
-    pub(crate) secret: EphemeralSecret,
+    pub(crate) secret: KeyExchangeSecret,
 }
 
 impl<'config, CipherSuite> ClientHello<'config, CipherSuite>
@@ -44,18 +50,62 @@ where
     {
         let mut random = [0; 32];
         provider.rng().fill_bytes(&mut random);
+        let mut rng = provider.rng();
 
         Self {
             config,
             random,
             cipher_suite: PhantomData,
-            secret: EphemeralSecret::random(&mut provider.rng()),
+            #[cfg(not(any(feature = "x25519", feature = "mlkem")))]
+            secret: KeyExchangeSecret::Secp256r1(EphemeralSecret::generate_from_rng(&mut rng)),
+            #[cfg(all(feature = "mlkem", not(feature = "x25519")))]
+            secret: KeyExchangeSecret::Secp256r1MlKem768(
+                EphemeralSecret::generate_from_rng(&mut rng),
+                MlKem768::generate_keypair_from_rng(&mut rng).0,
+            ),
+            #[cfg(all(feature = "x25519", not(feature = "mlkem")))]
+            secret: KeyExchangeSecret::X25519(EphemeralSecret::random_from_rng(&mut rng)),
+            #[cfg(all(feature = "x25519", feature = "mlkem"))]
+            secret: KeyExchangeSecret::X25519MlKem768(
+                EphemeralSecret::random_from_rng(&mut rng),
+                MlKem768::generate_keypair_from_rng(&mut rng).0,
+            ),
         }
     }
 
     pub(crate) fn encode(&self, buf: &mut CryptoBuffer<'_>) -> Result<(), TlsError> {
-        let public_key = EncodedPoint::from(&self.secret.public_key());
+        #[cfg(not(any(feature = "x25519", feature = "mlkem")))]
+        let KeyExchangeSecret::Secp256r1(secret) = &self.secret;
+        #[cfg(all(feature = "mlkem", not(feature = "x25519")))]
+        let KeyExchangeSecret::Secp256r1MlKem768(secret, kem) = &self.secret;
+        #[cfg(all(feature = "x25519", not(feature = "mlkem")))]
+        let KeyExchangeSecret::X25519(secret) = &self.secret;
+        #[cfg(all(feature = "x25519", feature = "mlkem"))]
+        let KeyExchangeSecret::X25519MlKem768(secret, kem) = &self.secret;
+
+        #[cfg(not(feature = "x25519"))]
+        let public_key = Sec1Point::<NistP256>::from(&secret.public_key());
+        #[cfg(not(feature = "x25519"))]
         let public_key = public_key.as_ref();
+
+        #[cfg(feature = "x25519")]
+        let public_key = &x25519_dalek::PublicKey::from(secret).to_bytes()[..];
+
+        // concat(pubkey + ek) for secp256MlKem768 (65+1184 = 1249 bytes)
+        #[cfg(all(feature = "mlkem", not(feature = "x25519")))]
+        let mut hybrid: Vec<u8, 1249> = Vec::new();
+        #[cfg(all(feature = "mlkem", not(feature = "x25519")))]
+        hybrid.extend_from_slice(public_key).unwrap();
+        #[cfg(all(feature = "mlkem", not(feature = "x25519")))]
+        hybrid.extend(kem.encapsulation_key().to_bytes());
+
+        // concat(ek + pubkey) for x25519MlKem768 (1184+32 = 1216 bytes)
+        #[cfg(all(feature = "x25519", feature = "mlkem"))]
+        let mut hybrid: Vec<u8, 1216> = Vec::new();
+        #[cfg(all(feature = "x25519", feature = "mlkem"))]
+        hybrid.extend(kem.encapsulation_key().to_bytes());
+        #[cfg(all(feature = "x25519", feature = "mlkem"))]
+        hybrid.extend_from_slice(public_key).unwrap();
 
         buf.push_u16(LEGACY_VERSION)
             .map_err(|_| TlsError::EncodeError)?;
@@ -109,10 +159,28 @@ where
             .encode(buf)?;
 
             ClientHelloExtension::KeyShare(KeyShareClientHello {
-                client_shares: Vec::from_slice(&[KeyShareEntry {
-                    group: NamedGroup::Secp256r1,
-                    opaque: public_key,
-                }])
+                client_shares: Vec::from_slice(&[
+                    #[cfg(not(feature = "x25519"))]
+                    KeyShareEntry {
+                        group: NamedGroup::Secp256r1,
+                        opaque: public_key,
+                    },
+                    #[cfg(all(feature = "mlkem", not(feature = "x25519")))]
+                    KeyShareEntry {
+                        group: NamedGroup::SecP256r1MLKEM768,
+                        opaque: &hybrid,
+                    },
+                    #[cfg(feature = "x25519")]
+                    KeyShareEntry {
+                        group: NamedGroup::X25519,
+                        opaque: public_key,
+                    },
+                    #[cfg(all(feature = "mlkem", feature = "x25519"))]
+                    KeyShareEntry {
+                        group: NamedGroup::X25519MLKEM768,
+                        opaque: &hybrid,
+                    },
+                ])
                 .unwrap(),
             })
             .encode(buf)?;

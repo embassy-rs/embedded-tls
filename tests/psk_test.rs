@@ -1,8 +1,10 @@
-#![macro_use]
+//#![macro_use]
 use embedded_io_adapters::tokio_1::FromTokio;
 use embedded_tls::*;
 use openssl::ssl;
-use rand::rngs::OsRng;
+use rand::rngs::SysRng;
+use rand_core::UnwrapErr;
+
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::net::TcpListener;
@@ -62,6 +64,7 @@ fn setup() -> (SocketAddr, JoinHandle<()>) {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_psk_open() {
     let (addr, h) = setup();
+    let rng = UnwrapErr(SysRng);
     timeout(Duration::from_secs(120), async move {
         println!("Connecting...");
         let stream = TcpStream::connect(addr)
@@ -84,7 +87,7 @@ async fn test_psk_open() {
         assert!(
             tls.open(TlsContext::new(
                 &config,
-                UnsecureProvider::new::<Aes128GcmSha256>(OsRng)
+                UnsecureProvider::new::<Aes128GcmSha256>(rng)
             ))
             .await
             .is_ok()

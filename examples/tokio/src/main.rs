@@ -1,9 +1,6 @@
-#![macro_use]
-
 use embedded_io_adapters::tokio_1::FromTokio;
 use embedded_io_async::Write as _;
 use embedded_tls::*;
-use rand::rngs::OsRng;
 use std::error::Error;
 use tokio::net::TcpStream;
 
@@ -25,7 +22,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     tls.open(TlsContext::new(
         &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
+        UnsecureProvider::new::<Aes128GcmSha256>(rand::rng()),
     ))
     .await
     .expect("error establishing TLS connection");

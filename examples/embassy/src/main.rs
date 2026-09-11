@@ -8,7 +8,7 @@ use embedded_io_async::Write;
 use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
 use heapless::Vec;
 use log::*;
-use rand::{rngs::OsRng, RngCore};
+use rand::Rng;
 use static_cell::StaticCell;
 
 #[derive(Parser)]
@@ -47,7 +47,7 @@ async fn main_task(spawner: Spawner) {
 
     // Generate random seed
     let mut seed = [0; 8];
-    OsRng.fill_bytes(&mut seed);
+    rand::rng().fill_bytes(&mut seed);
     let seed = u64::from_le_bytes(seed);
 
     // Init network stack
@@ -81,7 +81,7 @@ async fn main_task(spawner: Spawner) {
 
     tls.open(TlsContext::new(
         &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
+        UnsecureProvider::new::<Aes128GcmSha256>(rand::rng()),
     ))
     .await
     .expect("error establishing TLS connection");
