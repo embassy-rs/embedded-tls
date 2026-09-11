@@ -1,6 +1,4 @@
 use crate::TlsError;
-use aes_gcm::Error;
-use aes_gcm::aead::Buffer;
 
 pub struct CryptoBuffer<'b> {
     buf: &'b mut [u8],
@@ -226,16 +224,6 @@ impl AsRef<[u8]> for CryptoBuffer<'_> {
 impl AsMut<[u8]> for CryptoBuffer<'_> {
     fn as_mut(&mut self) -> &mut [u8] {
         self.as_mut_slice()
-    }
-}
-
-impl Buffer for CryptoBuffer<'_> {
-    fn extend_from_slice(&mut self, other: &[u8]) -> Result<(), Error> {
-        self.extend_internal(other).map_err(|_| Error)
-    }
-
-    fn truncate(&mut self, len: usize) {
-        self.truncate_internal(len);
     }
 }
 

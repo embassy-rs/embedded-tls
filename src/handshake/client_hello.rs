@@ -1,14 +1,13 @@
 use core::marker::PhantomData;
 
-use digest::{Digest, OutputSizeUser};
+use embassy_crypto::p256::SecretKey;
+use embassy_crypto::rng_fill_bytes;
 use heapless::Vec;
-use p256::EncodedPoint;
-use p256::ecdh::EphemeralSecret;
-use p256::elliptic_curve::rand_core::RngCore;
-use typenum::Unsigned;
 
 use crate::TlsError;
+use crate::buffer::CryptoBuffer;
 use crate::config::{TlsCipherSuite, TlsConfig};
+use crate::crypto::{ByteArray, TlsHash};
 use crate::extensions::extension_data::alpn::AlpnProtocolNameList;
 use crate::extensions::extension_data::key_share::{KeyShareClientHello, KeyShareEntry};
 use crate::extensions::extension_data::pre_shared_key::PreSharedKeyClientHello;
@@ -21,8 +20,7 @@ use crate::extensions::extension_data::supported_groups::{NamedGroup, SupportedG
 use crate::extensions::extension_data::supported_versions::{SupportedVersionsClientHello, TLS13};
 use crate::extensions::messages::ClientHelloExtension;
 use crate::handshake::{LEGACY_VERSION, Random};
-use crate::key_schedule::{HashOutputSize, WriteKeySchedule};
-use crate::{CryptoProvider, buffer::CryptoBuffer};
+use crate::key_schedule::{HashOutput, WriteKeySchedule};
 
 pub struct ClientHello<'config, CipherSuite>
 where
@@ -31,31 +29,33 @@ where
     pub(crate) config: &'config TlsConfig<'config>,
     random: Random,
     cipher_suite: PhantomData<CipherSuite>,
-    pub(crate) secret: EphemeralSecret,
+    pub(crate) secret: SecretKey,
 }
 
 impl<'config, CipherSuite> ClientHello<'config, CipherSuite>
 where
     CipherSuite: TlsCipherSuite,
 {
-    pub fn new<Provider>(config: &'config TlsConfig<'config>, mut provider: Provider) -> Self
-    where
-        Provider: CryptoProvider,
-    {
+    pub fn new(config: &'config TlsConfig<'config>) -> Result<Self, TlsError> {
         let mut random = [0; 32];
-        provider.rng().fill_bytes(&mut random);
+        rng_fill_bytes(&mut random);
 
-        Self {
+        let secret = SecretKey::generate().map_err(|_| TlsError::CryptoError)?;
+
+        Ok(Self {
             config,
             random,
             cipher_suite: PhantomData,
-            secret: EphemeralSecret::random(&mut provider.rng()),
-        }
+            secret,
+        })
     }
 
     pub(crate) fn encode(&self, buf: &mut CryptoBuffer<'_>) -> Result<(), TlsError> {
-        let public_key = EncodedPoint::from(&self.secret.public_key());
-        let public_key = public_key.as_ref();
+        let public_key = self
+            .secret
+            .public_key()
+            .map_err(|_| TlsError::CryptoError)?
+            .to_sec1();
 
         buf.push_u16(LEGACY_VERSION)
             .map_err(|_| TlsError::EncodeError)?;
@@ -66,10 +66,6 @@ where
         buf.push(0).map_err(|_| TlsError::EncodeError)?;
 
         // cipher suites (2+)
-        //buf.extend_from_slice(&((self.config.cipher_suites.len() * 2) as u16).to_be_bytes());
-        //for c in self.config.cipher_suites.iter() {
-        //buf.extend_from_slice(&(*c as u16).to_be_bytes());
-        //}
         buf.push_u16(2).map_err(|_| TlsError::EncodeError)?;
         buf.push_u16(CipherSuite::CODE_POINT)
             .map_err(|_| TlsError::EncodeError)?;
@@ -111,7 +107,7 @@ where
             ClientHelloExtension::KeyShare(KeyShareClientHello {
                 client_shares: Vec::from_slice(&[KeyShareEntry {
                     group: NamedGroup::Secp256r1,
-                    opaque: public_key,
+                    opaque: &public_key,
                 }])
                 .unwrap(),
             })
@@ -137,7 +133,7 @@ where
             if let Some((_, identities)) = &self.config.psk {
                 ClientHelloExtension::PreSharedKey(PreSharedKeyClientHello {
                     identities: identities.clone(),
-                    hash_size: <CipherSuite::Hash as OutputSizeUser>::output_size(),
+                    hash_size: HashOutput::<CipherSuite>::LEN,
                 })
                 .encode(buf)?;
             }
@@ -163,7 +159,7 @@ where
         // This causes a few issues since lengths must be correctly inside the payload,
         // but won't actually be added to the record buffer until the end.
         if let Some((_, identities)) = &self.config.psk {
-            let binders_len = identities.len() * (1 + HashOutputSize::<CipherSuite>::to_usize());
+            let binders_len = identities.len() * (1 + HashOutput::<CipherSuite>::LEN);
 
             let binders_pos = enc_buf.len() - binders_len;
 

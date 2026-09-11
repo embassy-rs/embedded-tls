@@ -1,65 +1,35 @@
-use core::marker::PhantomData;
-
 use crate::TlsError;
 use crate::cipher_suites::CipherSuite;
+use crate::crypto::{TlsAead, TlsHash};
 use crate::extensions::extension_data::signature_algorithms::SignatureScheme;
 use crate::extensions::extension_data::supported_groups::NamedGroup;
 pub use crate::handshake::certificate::{CertificateEntryRef, CertificateRef};
 pub use crate::handshake::certificate_verify::CertificateVerifyRef;
-use aes_gcm::{AeadInPlace, Aes128Gcm, Aes256Gcm, KeyInit};
-use digest::core_api::BlockSizeUser;
-use digest::{Digest, FixedOutput, OutputSizeUser, Reset};
-use ecdsa::elliptic_curve::SecretKey;
-use generic_array::ArrayLength;
 use heapless::Vec;
-use p256::ecdsa::SigningKey;
-use rand_core::CryptoRngCore;
-pub use sha2::{Sha256, Sha384};
-use typenum::{Sum, U10, U12, U16, U32};
 
 pub use crate::extensions::extension_data::max_fragment_length::MaxFragmentLength;
 
 pub const TLS_RECORD_OVERHEAD: usize = 128;
 
-// longest label is 12b -> buf <= 2 + 1 + 6 + longest + 1 + hash_out = hash_out + 22
-type LongestLabel = U12;
-type LabelOverhead = U10;
-type LabelBuffer<CipherSuite> = Sum<
-    <<CipherSuite as TlsCipherSuite>::Hash as OutputSizeUser>::OutputSize,
-    Sum<LongestLabel, LabelOverhead>,
->;
-
 /// Represents a TLS 1.3 cipher suite
 pub trait TlsCipherSuite {
     const CODE_POINT: u16;
-    type Cipher: KeyInit<KeySize = Self::KeyLen> + AeadInPlace<NonceSize = Self::IvLen>;
-    type KeyLen: ArrayLength<u8>;
-    type IvLen: ArrayLength<u8>;
-
-    type Hash: Digest + Reset + Clone + OutputSizeUser + BlockSizeUser + FixedOutput;
-    type LabelBufferSize: ArrayLength<u8>;
+    type Cipher: TlsAead;
+    type Hash: TlsHash;
 }
 
 pub struct Aes128GcmSha256;
 impl TlsCipherSuite for Aes128GcmSha256 {
     const CODE_POINT: u16 = CipherSuite::TlsAes128GcmSha256 as u16;
-    type Cipher = Aes128Gcm;
-    type KeyLen = U16;
-    type IvLen = U12;
-
-    type Hash = Sha256;
-    type LabelBufferSize = LabelBuffer<Self>;
+    type Cipher = embassy_crypto::Aes128Gcm;
+    type Hash = embassy_crypto::Sha256;
 }
 
 pub struct Aes256GcmSha384;
 impl TlsCipherSuite for Aes256GcmSha384 {
     const CODE_POINT: u16 = CipherSuite::TlsAes256GcmSha384 as u16;
-    type Cipher = Aes256Gcm;
-    type KeyLen = U32;
-    type IvLen = U12;
-
-    type Hash = Sha384;
-    type LabelBufferSize = LabelBuffer<Self>;
+    type Cipher = embassy_crypto::Aes256Gcm;
+    type Hash = embassy_crypto::Sha384;
 }
 
 /// A TLS 1.3 verifier.
@@ -91,6 +61,34 @@ where
     fn verify_signature(&mut self, verify: CertificateVerifyRef) -> Result<(), crate::TlsError>;
 }
 
+impl<CipherSuite, T> TlsVerifier<CipherSuite> for &mut T
+where
+    CipherSuite: TlsCipherSuite,
+    T: TlsVerifier<CipherSuite>,
+{
+    fn set_hostname_verification(&mut self, hostname: &str) -> Result<(), crate::TlsError> {
+        T::set_hostname_verification(self, hostname)
+    }
+
+    fn verify_certificate(
+        &mut self,
+        transcript: &CipherSuite::Hash,
+        cert: CertificateRef,
+    ) -> Result<(), TlsError> {
+        T::verify_certificate(self, transcript, cert)
+    }
+
+    fn verify_signature(&mut self, verify: CertificateVerifyRef) -> Result<(), crate::TlsError> {
+        T::verify_signature(self, verify)
+    }
+}
+
+/// A verifier that accepts any server certificate without checking it.
+///
+/// Only use this when the server is authenticated by other means, such as a pre-shared key,
+/// or for testing.
+#[derive(Debug, Default, Clone, Copy)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct NoVerify;
 
 impl<CipherSuite> TlsVerifier<CipherSuite> for NoVerify
@@ -138,152 +136,168 @@ impl TlsClock for NoClock {
     }
 }
 
-pub trait CryptoProvider {
-    type CipherSuite: TlsCipherSuite;
-    type Signature: AsRef<[u8]>;
+/// A private key used to sign the `CertificateVerify` message for client certificate authentication.
+///
+/// Signing is performed by the `embassy-crypto` driver registered for the key's algorithm.
+#[non_exhaustive]
+#[allow(clippy::large_enum_variant)]
+pub enum PrivateKey {
+    /// ECDSA over P-256 with SHA-256 (`ecdsa_secp256r1_sha256`).
+    #[cfg(feature = "p256")]
+    EcdsaP256(embassy_crypto::p256::SigningKey),
+    /// ECDSA over P-384 with SHA-384 (`ecdsa_secp384r1_sha384`).
+    #[cfg(feature = "p384")]
+    EcdsaP384(embassy_crypto::p384::SigningKey),
+    /// Ed25519 (`ed25519`).
+    #[cfg(feature = "ed25519")]
+    Ed25519(embassy_crypto::ed25519::SigningKey),
+    /// RSA, signing with RSASSA-PSS over SHA-256 (`rsa_pss_rsae_sha256`).
+    #[cfg(feature = "rsa")]
+    Rsa(rsa::RsaPrivateKey),
+}
 
-    fn rng(&mut self) -> impl CryptoRngCore;
-
-    fn verifier(&mut self) -> Result<&mut impl TlsVerifier<Self::CipherSuite>, crate::TlsError> {
-        Err::<&mut NoVerify, _>(crate::TlsError::Unimplemented)
-    }
-
-    /// Provide a signing key for client certificate authentication.
+impl PrivateKey {
+    /// Load an EC private key from its DER-encoded SEC1 `ECPrivateKey` (RFC 5915) structure.
     ///
-    /// The provider resolves the private key internally (e.g. from memory, flash, or a hardware
-    /// crypto module such as an HSM/TPM/secure element).
-    fn signer(
-        &mut self,
-    ) -> Result<(impl signature::SignerMut<Self::Signature>, SignatureScheme), crate::TlsError>
-    {
-        Err::<(NoSign, _), crate::TlsError>(crate::TlsError::Unimplemented)
+    /// This is the format of `-----BEGIN EC PRIVATE KEY-----` PEM files. The curve is selected
+    /// by the size of the private scalar.
+    pub fn from_sec1_der(der: &[u8]) -> Result<Self, TlsError> {
+        let scalar =
+            crate::crypto::sec1_private_key(der).map_err(|_| TlsError::InvalidPrivateKey)?;
+        Self::from_ec_bytes(scalar)
     }
 
-    /// Resolve the client certificate for mutual TLS authentication.
+    /// Load an EC private key from its raw big-endian scalar.
     ///
-    /// Return `None` if no client certificate is available (an empty certificate message will
-    /// be sent to the server). The data type `D` can be borrowed (`&[u8]`) or owned
-    /// (e.g. `heapless::Vec<u8, N>`) — the certificate is only needed long enough to encode
-    /// into the TLS message.
-    fn client_cert(&mut self) -> Option<Certificate<impl AsRef<[u8]>>> {
-        None::<Certificate<&[u8]>>
-    }
-}
-
-impl<T: CryptoProvider> CryptoProvider for &mut T {
-    type CipherSuite = T::CipherSuite;
-
-    type Signature = T::Signature;
-
-    fn rng(&mut self) -> impl CryptoRngCore {
-        T::rng(self)
+    /// The curve is selected by the size of the scalar: 32 bytes for P-256, 48 bytes for P-384.
+    pub fn from_ec_bytes(scalar: &[u8]) -> Result<Self, TlsError> {
+        match scalar.len() {
+            #[cfg(feature = "p256")]
+            32 => embassy_crypto::p256::SigningKey::from_bytes(unwrap!(scalar.try_into()))
+                .map(Self::EcdsaP256)
+                .map_err(|_| TlsError::InvalidPrivateKey),
+            #[cfg(feature = "p384")]
+            48 => embassy_crypto::p384::SigningKey::from_bytes(unwrap!(scalar.try_into()))
+                .map(Self::EcdsaP384)
+                .map_err(|_| TlsError::InvalidPrivateKey),
+            _ => Err(TlsError::InvalidPrivateKey),
+        }
     }
 
-    fn verifier(&mut self) -> Result<&mut impl TlsVerifier<Self::CipherSuite>, crate::TlsError> {
-        T::verifier(self)
+    /// The signature scheme this key signs with.
+    #[must_use]
+    pub fn signature_scheme(&self) -> SignatureScheme {
+        // A place expression, so that the match is exhaustive when no algorithm is enabled.
+        match *self {
+            #[cfg(feature = "p256")]
+            Self::EcdsaP256(_) => SignatureScheme::EcdsaSecp256r1Sha256,
+            #[cfg(feature = "p384")]
+            Self::EcdsaP384(_) => SignatureScheme::EcdsaSecp384r1Sha384,
+            #[cfg(feature = "ed25519")]
+            Self::Ed25519(_) => SignatureScheme::Ed25519,
+            #[cfg(feature = "rsa")]
+            Self::Rsa(_) => SignatureScheme::RsaPssRsaeSha256,
+        }
     }
 
-    fn signer(
-        &mut self,
-    ) -> Result<(impl signature::SignerMut<Self::Signature>, SignatureScheme), crate::TlsError>
-    {
-        T::signer(self)
-    }
+    /// Sign `message`, writing the TLS encoding of the signature to `out`.
+    #[cfg_attr(
+        not(any(
+            feature = "p256",
+            feature = "p384",
+            feature = "ed25519",
+            feature = "rsa"
+        )),
+        allow(unused_variables)
+    )]
+    pub(crate) fn sign<const N: usize>(
+        &self,
+        message: &[u8],
+        out: &mut Vec<u8, N>,
+    ) -> Result<(), TlsError> {
+        match *self {
+            #[cfg(feature = "p256")]
+            Self::EcdsaP256(ref key) => crate::crypto::sign_ecdsa_p256(key, message, out),
+            #[cfg(feature = "p384")]
+            Self::EcdsaP384(ref key) => crate::crypto::sign_ecdsa_p384(key, message, out),
+            #[cfg(feature = "ed25519")]
+            Self::Ed25519(ref key) => crate::crypto::sign_ed25519(key, message, out),
+            #[cfg(feature = "rsa")]
+            Self::Rsa(ref key) => {
+                use rsa::signature::{RandomizedSigner, SignatureEncoding};
 
-    fn client_cert(&mut self) -> Option<Certificate<impl AsRef<[u8]>>> {
-        T::client_cert(self)
-    }
-}
-
-pub struct NoSign;
-
-impl<S> signature::Signer<S> for NoSign {
-    fn try_sign(&self, _msg: &[u8]) -> Result<S, signature::Error> {
-        unimplemented!()
-    }
-}
-
-pub struct UnsecureProvider<'a, CipherSuite, RNG> {
-    rng: RNG,
-    priv_key: Option<&'a [u8]>,
-    client_cert: Option<Certificate<&'a [u8]>>,
-    _marker: PhantomData<CipherSuite>,
-}
-
-impl<RNG: CryptoRngCore> UnsecureProvider<'_, (), RNG> {
-    pub fn new<CipherSuite: TlsCipherSuite>(
-        rng: RNG,
-    ) -> UnsecureProvider<'static, CipherSuite, RNG> {
-        UnsecureProvider {
-            rng,
-            priv_key: None,
-            client_cert: None,
-            _marker: PhantomData,
+                let signing_key = rsa::pss::SigningKey::<rsa::sha2::Sha256>::new(key.clone());
+                let signature = signing_key
+                    .try_sign_with_rng(&mut crate::crypto::RsaRng, message)
+                    .map_err(|_| TlsError::CryptoError)?;
+                out.clear();
+                out.extend_from_slice(&signature.to_bytes())
+                    .map_err(|_| TlsError::EncodeError)
+            }
         }
     }
 }
 
-impl<'a, CipherSuite: TlsCipherSuite, RNG: CryptoRngCore> UnsecureProvider<'a, CipherSuite, RNG> {
-    pub fn with_priv_key(mut self, priv_key: &'a [u8]) -> Self {
-        self.priv_key = Some(priv_key);
-        self
-    }
-
-    pub fn with_cert(mut self, cert: Certificate<&'a [u8]>) -> Self {
-        self.client_cert = Some(cert);
-        self
+impl core::fmt::Debug for PrivateKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("PrivateKey")
+            .field(&self.signature_scheme())
+            .finish()
     }
 }
 
-impl<CipherSuite: TlsCipherSuite, RNG: CryptoRngCore> CryptoProvider
-    for UnsecureProvider<'_, CipherSuite, RNG>
-{
-    type CipherSuite = CipherSuite;
-    type Signature = p256::ecdsa::DerSignature;
-
-    fn rng(&mut self) -> impl CryptoRngCore {
-        &mut self.rng
-    }
-
-    fn signer(
-        &mut self,
-    ) -> Result<(impl signature::SignerMut<Self::Signature>, SignatureScheme), crate::TlsError>
-    {
-        let key_der = self.priv_key.ok_or(TlsError::InvalidPrivateKey)?;
-        let secret_key =
-            SecretKey::from_sec1_der(key_der).map_err(|_| TlsError::InvalidPrivateKey)?;
-
-        Ok((
-            SigningKey::from(&secret_key),
-            SignatureScheme::EcdsaSecp256r1Sha256,
-        ))
-    }
-
-    fn client_cert(&mut self) -> Option<Certificate<impl AsRef<[u8]>>> {
-        self.client_cert.clone()
+#[cfg(feature = "defmt")]
+impl defmt::Format for PrivateKey {
+    fn format(&self, f: defmt::Formatter<'_>) {
+        defmt::write!(f, "PrivateKey({:?})", self.signature_scheme());
     }
 }
 
+/// Everything needed to open a connection: the configuration, the certificate verifier
+/// and, optionally, the client certificate and key for mutual authentication.
+///
+/// By default no certificate verification is performed ([`NoVerify`]); use
+/// [`with_verifier`](Self::with_verifier) to verify the server certificate chain.
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct TlsContext<'a, Provider>
-where
-    Provider: CryptoProvider,
-{
+pub struct TlsContext<'a, Verifier = NoVerify> {
     pub(crate) config: &'a TlsConfig<'a>,
-    pub(crate) crypto_provider: Provider,
+    pub(crate) verifier: Verifier,
+    pub(crate) client_cert: Option<Certificate<&'a [u8]>>,
+    pub(crate) private_key: Option<&'a PrivateKey>,
 }
 
-impl<'a, Provider> TlsContext<'a, Provider>
-where
-    Provider: CryptoProvider,
-{
-    /// Create a new context with a given config and a crypto provider.
-    pub fn new(config: &'a TlsConfig<'a>, crypto_provider: Provider) -> Self {
+impl<'a> TlsContext<'a> {
+    /// Create a new context with a given config and no certificate verification.
+    #[must_use]
+    pub fn new(config: &'a TlsConfig<'a>) -> Self {
         Self {
             config,
-            crypto_provider,
+            verifier: NoVerify,
+            client_cert: None,
+            private_key: None,
         }
+    }
+}
+
+impl<'a, Verifier> TlsContext<'a, Verifier> {
+    /// Use `verifier` to verify the server certificate and its signature.
+    #[must_use]
+    pub fn with_verifier<V>(self, verifier: V) -> TlsContext<'a, V> {
+        TlsContext {
+            config: self.config,
+            verifier,
+            client_cert: self.client_cert,
+            private_key: self.private_key,
+        }
+    }
+
+    /// Present `cert` and sign with `key` if the server requests client certificate authentication.
+    #[must_use]
+    pub fn with_client_cert(mut self, cert: Certificate<&'a [u8]>, key: &'a PrivateKey) -> Self {
+        self.client_cert = Some(cert);
+        self.private_key = Some(key);
+        self
     }
 }
 

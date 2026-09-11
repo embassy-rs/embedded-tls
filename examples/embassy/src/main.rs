@@ -5,11 +5,16 @@ use embassy_net::{Config, Ipv4Address, Ipv4Cidr, Runner, StackResources};
 use embassy_net_tuntap::TunTapDevice;
 use embassy_time::Duration;
 use embedded_io_async::Write;
-use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext, UnsecureProvider};
+use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext};
 use heapless::Vec;
 use log::*;
-use rand::{rngs::OsRng, RngCore};
 use static_cell::StaticCell;
+
+// All cryptography is served by `embassy-crypto` drivers, resolved at link time: link the
+// software drivers and the operating system random number generator.
+use embassy_crypto::rng_fill_bytes;
+use embassy_crypto_rand as _;
+use embassy_crypto_rustcrypto as _;
 
 #[derive(Parser)]
 #[clap(version = "1.0")]
@@ -47,7 +52,7 @@ async fn main_task(spawner: Spawner) {
 
     // Generate random seed
     let mut seed = [0; 8];
-    OsRng.fill_bytes(&mut seed);
+    rng_fill_bytes(&mut seed);
     let seed = u64::from_le_bytes(seed);
 
     // Init network stack
@@ -77,13 +82,11 @@ async fn main_task(spawner: Spawner) {
     let mut read_record_buffer = [0; 16384];
     let mut write_record_buffer = [0; 16384];
     let config = TlsConfig::new().with_server_name("example.com");
-    let mut tls = TlsConnection::new(socket, &mut read_record_buffer, &mut write_record_buffer);
+    let mut tls: TlsConnection<_, Aes128GcmSha256> =
+        TlsConnection::new(socket, &mut read_record_buffer, &mut write_record_buffer);
 
-    tls.open(TlsContext::new(
-        &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ))
-    .await
+    tls.open(TlsContext::new(&config))
+        .await
     .expect("error establishing TLS connection");
 
     tls.write_all(b"ping").await.expect("error writing data");

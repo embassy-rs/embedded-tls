@@ -1,10 +1,10 @@
 #![macro_use]
 use embedded_io::{Read, Write};
 use embedded_io_adapters::std::FromStd;
-use rand_core::OsRng;
 use std::net::SocketAddr;
 use std::sync::Once;
 
+mod common;
 mod tlsserver;
 
 static INIT: Once = Once::new();
@@ -66,17 +66,14 @@ fn early_data_ignored() {
     let mut write_record_buffer = [0; 16384];
     let config = TlsConfig::new().with_server_name("localhost");
 
-    let mut tls = TlsConnection::new(
+    let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
         FromStd::new(stream),
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
 
-    tls.open(TlsContext::new(
-        &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ))
-    .expect("error establishing TLS connection");
+    tls.open(TlsContext::new(&config))
+        .expect("error establishing TLS connection");
 
     tls.write_all(b"ping").expect("Failed to write data");
     tls.flush().expect("Failed to flush");

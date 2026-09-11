@@ -2,34 +2,14 @@
 
 use embedded_io_adapters::tokio_1::FromTokio;
 use embedded_tls::webpki::CertVerifier;
-use embedded_tls::{Aes128GcmSha256, CryptoProvider, TlsVerifier};
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
+mod common;
 mod tlsserver;
 
 static LOG_INIT: OnceLock<()> = OnceLock::new();
-
-struct WebPkiProvider<'a> {
-    rng: rand::rngs::OsRng,
-    verifier: CertVerifier<'a, Aes128GcmSha256, SystemTime, 4096>,
-}
-
-impl CryptoProvider for WebPkiProvider<'_> {
-    type CipherSuite = Aes128GcmSha256;
-    type Signature = &'static [u8];
-
-    fn rng(&mut self) -> impl embedded_tls::CryptoRngCore {
-        &mut self.rng
-    }
-
-    fn verifier(
-        &mut self,
-    ) -> Result<&mut impl TlsVerifier<Aes128GcmSha256>, embedded_tls::TlsError> {
-        Ok(&mut self.verifier)
-    }
-}
 
 fn init_log() {
     LOG_INIT.get_or_init(|| {
@@ -76,19 +56,15 @@ async fn test_server_certificate_validation() {
     // Hostname verification is not enabled
     let config = TlsConfig::new();
 
-    let mut tls = TlsConnection::new(
+    let mut tls = TlsConnection::<_, Aes128GcmSha256>::new(
         FromTokio::new(stream),
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
 
-    let open_fut = tls.open(TlsContext::new(
-        &config,
-        WebPkiProvider {
-            rng: rand::rngs::OsRng,
-            verifier: CertVerifier::new(Certificate::X509(&der[..])),
-        },
-    ));
+    let verifier: CertVerifier<Aes128GcmSha256, SystemTime, 4096> =
+        CertVerifier::new(Certificate::X509(&der[..]));
+    let open_fut = tls.open(TlsContext::new(&config).with_verifier(verifier));
 
     open_fut.await.expect("error establishing TLS connection");
 

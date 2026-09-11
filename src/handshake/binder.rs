@@ -1,39 +1,36 @@
 use crate::TlsError;
 use crate::buffer::CryptoBuffer;
+use crate::crypto::{ByteArray, TlsHash};
 use core::fmt::{Debug, Formatter};
-//use digest::generic_array::{ArrayLength, GenericArray};
-use generic_array::{ArrayLength, GenericArray};
-// use heapless::Vec;
 
-pub struct PskBinder<N: ArrayLength<u8>> {
-    pub verify: GenericArray<u8, N>,
+pub struct PskBinder<H: TlsHash> {
+    pub verify: H::Output,
 }
 
 #[cfg(feature = "defmt")]
-impl<N: ArrayLength<u8>> defmt::Format for PskBinder<N> {
+impl<H: TlsHash> defmt::Format for PskBinder<H> {
     fn format(&self, f: defmt::Formatter<'_>) {
-        defmt::write!(f, "verify length:{}", &self.verify.len());
+        defmt::write!(f, "verify length:{}", H::Output::LEN);
     }
 }
 
-impl<N: ArrayLength<u8>> Debug for PskBinder<N> {
+impl<H: TlsHash> Debug for PskBinder<H> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PskBinder").finish()
     }
 }
 
-impl<N: ArrayLength<u8>> PskBinder<N> {
+impl<H: TlsHash> PskBinder<H> {
     pub(crate) fn encode(&self, buf: &mut CryptoBuffer<'_>) -> Result<(), TlsError> {
-        let len = self.verify.len() as u8;
-        //buf.extend_from_slice(&[len[1], len[2], len[3]]);
-        buf.push(len).map_err(|_| TlsError::EncodeError)?;
-        buf.extend_from_slice(&self.verify[..self.verify.len()])
+        buf.push(H::Output::LEN as u8)
+            .map_err(|_| TlsError::EncodeError)?;
+        buf.extend_from_slice(self.verify.as_ref())
             .map_err(|_| TlsError::EncodeError)?;
         Ok(())
     }
 
     #[allow(dead_code)]
     pub fn len() -> usize {
-        N::to_usize()
+        H::Output::LEN
     }
 }

@@ -1,24 +1,22 @@
 use crate::TlsError;
 use crate::buffer::CryptoBuffer;
+use crate::crypto::{ByteArray, TlsHash};
 use crate::parse_buffer::ParseBuffer;
 use core::fmt::{Debug, Formatter};
-//use digest::generic_array::{ArrayLength, GenericArray};
-use generic_array::{ArrayLength, GenericArray};
-// use heapless::Vec;
 
-pub struct Finished<N: ArrayLength<u8>> {
-    pub verify: GenericArray<u8, N>,
-    pub hash: Option<GenericArray<u8, N>>,
+pub struct Finished<H: TlsHash> {
+    pub verify: H::Output,
+    pub hash: Option<H::Output>,
 }
 
 #[cfg(feature = "defmt")]
-impl<N: ArrayLength<u8>> defmt::Format for Finished<N> {
+impl<H: TlsHash> defmt::Format for Finished<H> {
     fn format(&self, f: defmt::Formatter<'_>) {
-        defmt::write!(f, "verify length:{}", &self.verify.len());
+        defmt::write!(f, "verify length:{}", H::Output::LEN);
     }
 }
 
-impl<N: ArrayLength<u8>> Debug for Finished<N> {
+impl<H: TlsHash> Debug for Finished<H> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Finished")
             .field("verify", &self.hash)
@@ -26,26 +24,15 @@ impl<N: ArrayLength<u8>> Debug for Finished<N> {
     }
 }
 
-impl<N: ArrayLength<u8>> Finished<N> {
+impl<H: TlsHash> Finished<H> {
     pub fn parse(buf: &mut ParseBuffer, _len: u32) -> Result<Self, TlsError> {
-        // info!("finished len: {}", len);
-        let mut verify = GenericArray::default();
-        buf.fill(&mut verify)?;
-        //let hash = GenericArray::from_slice()
-        //let hash: Result<Vec<u8, _>, ()> = buf
-        //.slice(len as usize)
-        //.map_err(|_| TlsError::InvalidHandshake)?
-        //.into();
-        // info!("hash {:?}", verify);
-        //let hash = hash.map_err(|_| TlsError::InvalidHandshake)?;
-        // info!("hash ng {:?}", verify);
+        let mut verify = H::Output::zeroed();
+        buf.fill(verify.as_mut())?;
         Ok(Self { verify, hash: None })
     }
 
     pub(crate) fn encode(&self, buf: &mut CryptoBuffer<'_>) -> Result<(), TlsError> {
-        //let len = self.verify.len().to_be_bytes();
-        //buf.extend_from_slice(&[len[1], len[2], len[3]]);
-        buf.extend_from_slice(&self.verify[..self.verify.len()])
+        buf.extend_from_slice(self.verify.as_ref())
             .map_err(|_| TlsError::EncodeError)?;
         Ok(())
     }

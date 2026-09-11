@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Unreleased
 
 - Fix a record-stream desync when an async record read is cancelled and resumed (e.g. under a read/write `select`): persist the partial record header on the reader, and read only the still-missing body bytes in `advance` instead of a fixed `amount`.
+- All crypto (except RSA) and RNG is now done through `embassy-crypto`. You must add dependencies providing implementations yourself. See the [`embassy-crypto` README](https://docs.embassy.dev/embassy-crypto) for details.
+- Removed the `CryptoProvider` trait and `UnsecureProvider`. `TlsContext::new` now only takes the config; the verifier is set with `TlsContext::with_verifier` and the client certificate and key with `TlsContext::with_client_cert`. The cipher suite is selected by the `TlsConnection` generic param.
+- Added `PrivateKey` for client certificate authentication.
+- Added the `p256` feature, for consistency with `p384` and `ed25519`.
 
 ## 0.19.0 - 2026-06-01
 
