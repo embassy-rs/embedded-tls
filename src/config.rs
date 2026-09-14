@@ -136,6 +136,53 @@ impl TlsClock for NoClock {
     }
 }
 
+/// A signing key held outside this crate — an HSM, TPM, secure element, or any
+/// other device that signs without releasing the private key.
+///
+/// Implement this when the private key cannot be loaded into memory, and pass it
+/// as [`PrivateKey::External`]. The implementation receives the message to be
+/// signed and writes the TLS encoding of the signature (the same encoding the
+/// built-in variants produce: DER `SEQUENCE { r, s }` for ECDSA, the raw 64-byte
+/// `R || S` for Ed25519).
+pub trait SigningKey {
+    /// The signature scheme this key signs with.
+    fn signature_scheme(&self) -> SignatureScheme;
+
+    /// Sign `message`, writing the TLS encoding of the signature to `out`.
+    ///
+    /// Returns the number of bytes written.
+    fn sign(&self, message: &[u8], out: &mut [u8]) -> Result<usize, SigningError>;
+}
+
+/// Error returned by a [`SigningKey`] implementation.
+///
+/// Deliberately narrow, so an implementor cannot return an error this crate
+/// does not expect from a signer. [`SigningError::Failed`] carries an
+/// implementation-defined code so the signer's own error is not lost on the
+/// way out — this crate logs it and otherwise treats it as opaque.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[non_exhaustive]
+pub enum SigningError {
+    /// `out` was too small to hold the signature.
+    BufferTooSmall,
+    /// The signer could not produce a signature: hardware fault, key
+    /// unavailable, policy refusal. `code` is defined by the implementation.
+    Failed { code: u32 },
+}
+
+impl From<SigningError> for TlsError {
+    fn from(error: SigningError) -> Self {
+        match error {
+            SigningError::BufferTooSmall => TlsError::EncodeError,
+            SigningError::Failed { code } => {
+                warn!("external signer failed with code {}", code);
+                TlsError::CryptoError
+            }
+        }
+    }
+}
+
 /// A private key used to sign the `CertificateVerify` message for client certificate authentication.
 ///
 /// Signing is performed by the `embassy-crypto` driver registered for the key's algorithm.
@@ -154,6 +201,11 @@ pub enum PrivateKey {
     /// RSA, signing with RSASSA-PSS over SHA-256 (`rsa_pss_rsae_sha256`).
     #[cfg(feature = "rsa")]
     Rsa(rsa::RsaPrivateKey),
+    /// A key held outside this crate, signed by a [`SigningKey`] implementation.
+    ///
+    /// Use this when the private key never leaves its hardware — an HSM, TPM or
+    /// secure element — and so cannot be represented by the variants above.
+    External(&'static dyn SigningKey),
 }
 
 impl PrivateKey {
@@ -197,6 +249,7 @@ impl PrivateKey {
             Self::Ed25519(_) => SignatureScheme::Ed25519,
             #[cfg(feature = "rsa")]
             Self::Rsa(_) => SignatureScheme::RsaPssRsaeSha256,
+            Self::External(key) => key.signature_scheme(),
         }
     }
 
@@ -233,6 +286,13 @@ impl PrivateKey {
                 out.clear();
                 out.extend_from_slice(&signature.to_bytes())
                     .map_err(|_| TlsError::EncodeError)
+            }
+            Self::External(key) => {
+                out.clear();
+                out.resize_default(N).map_err(|_| TlsError::EncodeError)?;
+                let len = key.sign(message, out).map_err(TlsError::from)?;
+                out.truncate(len);
+                Ok(())
             }
         }
     }
@@ -427,4 +487,95 @@ impl Default for TlsConfig<'_> {
 pub enum Certificate<D> {
     X509(D),
     RawPublicKey(D),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A signer standing in for an HSM: it holds no key material, and produces a
+    /// signature the test can recognise.
+    struct ExternalEd25519;
+
+    impl SigningKey for ExternalEd25519 {
+        fn signature_scheme(&self) -> SignatureScheme {
+            SignatureScheme::Ed25519
+        }
+
+        fn sign(&self, message: &[u8], out: &mut [u8]) -> Result<usize, SigningError> {
+            if out.len() < 64 {
+                return Err(SigningError::BufferTooSmall);
+            }
+            out[..64].fill(0xAB);
+            out[0] = message.len() as u8;
+            Ok(64)
+        }
+    }
+
+    struct TooBig;
+
+    impl SigningKey for TooBig {
+        fn signature_scheme(&self) -> SignatureScheme {
+            SignatureScheme::Ed25519
+        }
+
+        fn sign(&self, _message: &[u8], _out: &mut [u8]) -> Result<usize, SigningError> {
+            Err(SigningError::Failed { code: 0x1234 })
+        }
+    }
+
+    #[test]
+    fn external_key_reports_its_own_scheme() {
+        let key = PrivateKey::External(&ExternalEd25519);
+        assert_eq!(key.signature_scheme(), SignatureScheme::Ed25519);
+    }
+
+    #[test]
+    fn external_key_signature_is_truncated_to_the_length_written() {
+        let key = PrivateKey::External(&ExternalEd25519);
+        let mut out = Vec::<u8, 128>::new();
+        key.sign(b"hello", &mut out).unwrap();
+
+        assert_eq!(out.len(), 64);
+        assert_eq!(out[0], 5);
+        assert_eq!(out[1], 0xAB);
+    }
+
+    #[test]
+    fn external_key_signing_twice_does_not_accumulate() {
+        let key = PrivateKey::External(&ExternalEd25519);
+        let mut out = Vec::<u8, 128>::new();
+        key.sign(b"hello", &mut out).unwrap();
+        key.sign(b"hi", &mut out).unwrap();
+
+        assert_eq!(out.len(), 64);
+        assert_eq!(out[0], 2);
+    }
+
+    #[test]
+    fn external_signer_buffer_error_maps_to_encode_error() {
+        let mapped = TlsError::from(SigningError::BufferTooSmall);
+
+        assert!(matches!(mapped, TlsError::EncodeError));
+    }
+
+    #[test]
+    fn external_signer_failure_carries_its_own_code() {
+        const EXPECTED_CODE: u32 = 0x1234;
+        let error = SigningError::Failed {
+            code: EXPECTED_CODE,
+        };
+
+        let SigningError::Failed { code } = error else {
+            panic!("expected a Failed error");
+        };
+        assert_eq!(code, EXPECTED_CODE);
+    }
+
+    #[test]
+    fn external_key_propagates_signing_errors() {
+        let key = PrivateKey::External(&TooBig);
+        let mut out = Vec::<u8, 128>::new();
+        assert!(key.sign(b"hello", &mut out).is_err());
+    }
 }
