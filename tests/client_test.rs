@@ -63,7 +63,7 @@ async fn test_google() {
         &mut write_record_buffer,
     );
 
-    let open_fut = tls.open(TlsContext::new(&config));
+    let open_fut = tls.open(TlsContext::new(&config, NoVerify));
     log::info!("SIZE of open fut is {}", core::mem::size_of_val(&open_fut));
     open_fut.await.expect("error establishing TLS connection");
     log::info!("Established");
@@ -106,7 +106,7 @@ async fn test_ping() {
 
     log::info!("SIZE of connection is {}", core::mem::size_of_val(&tls));
 
-    let open_fut = tls.open(TlsContext::new(&config));
+    let open_fut = tls.open(TlsContext::new(&config, NoVerify));
     log::info!("SIZE of open fut is {}", core::mem::size_of_val(&open_fut));
     open_fut.await.expect("error establishing TLS connection");
     log::info!("Established");
@@ -168,7 +168,7 @@ async fn test_ping_nocopy() {
 
     log::info!("SIZE of connection is {}", core::mem::size_of_val(&tls));
 
-    let open_fut = tls.open(TlsContext::new(&config));
+    let open_fut = tls.open(TlsContext::new(&config, NoVerify));
     log::info!("SIZE of open fut is {}", core::mem::size_of_val(&open_fut));
     open_fut.await.expect("error establishing TLS connection");
     log::info!("Established");
@@ -230,7 +230,7 @@ async fn test_ping_nocopy_bufread() {
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
-    tls.open(TlsContext::new(&config))
+    tls.open(TlsContext::new(&config, NoVerify))
         .await
         .expect("error establishing TLS connection");
     log::info!("Established");
@@ -270,7 +270,7 @@ fn test_blocking_ping() {
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
-    tls.open(TlsContext::new(&config))
+    tls.open(TlsContext::new(&config, NoVerify))
         .expect("error establishing TLS connection");
     log::info!("Established");
 
@@ -316,7 +316,7 @@ fn test_blocking_ping_nocopy() {
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
-    tls.open(TlsContext::new(&config))
+    tls.open(TlsContext::new(&config, NoVerify))
         .expect("error establishing TLS connection");
     log::info!("Established");
 
@@ -356,7 +356,7 @@ fn test_blocking_ping_nocopy_bufread() {
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
-    tls.open(TlsContext::new(&config))
+    tls.open(TlsContext::new(&config, NoVerify))
         .expect("error establishing TLS connection");
     log::info!("Established");
 

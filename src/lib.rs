@@ -40,10 +40,10 @@ async fn main() {
         &mut write_record_buffer,
     );
 
-    // By default the server certificate is not verified, which is fine when using PSK or
+    // `NoVerify` skips server certificate verification, which is fine when using PSK or
     // when just testing. Otherwise, pass a verifier such as `embedded_tls::webpki::CertVerifier`
-    // (std only) or `embedded_tls::pki::CertVerifier` with `TlsContext::with_verifier`.
-    tls.open(TlsContext::new(&config))
+    // (std only) or `embedded_tls::pki::CertVerifier`.
+    tls.open(TlsContext::new(&config, NoVerify))
         .await
         .expect("error establishing TLS connection");
 

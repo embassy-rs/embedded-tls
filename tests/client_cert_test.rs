@@ -97,7 +97,7 @@ async fn test_client_certificate_auth() {
 
     let private_key = PrivateKey::from_sec1_der(&private_key_der).expect("invalid private key");
     let open_fut = tls.open(
-        TlsContext::new(&config)
+        TlsContext::new(&config, NoVerify)
             .with_client_cert(Certificate::X509(&client_cert_der), &private_key),
     );
     log::info!("SIZE of open fut is {}", core::mem::size_of_val(&open_fut));

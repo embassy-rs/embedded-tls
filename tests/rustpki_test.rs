@@ -94,7 +94,7 @@ async fn test_server_certificate_validation() {
 
     let verifier: CertVerifier<Aes128GcmSha256, SystemTime, 4096> =
         CertVerifier::new(Certificate::X509(&der[..]));
-    let open_fut = tls.open(TlsContext::new(&config).with_verifier(verifier));
+    let open_fut = tls.open(TlsContext::new(&config, verifier));
 
     open_fut.await.expect("error establishing TLS connection");
 
@@ -137,8 +137,7 @@ async fn test_mutual_certificate_validation() {
         CertVerifier::new(Certificate::X509(&ca_der[..]));
     let private_key = PrivateKey::from_sec1_der(&key_der).expect("invalid private key");
     let open_fut = tls.open(
-        TlsContext::new(&config)
-            .with_verifier(verifier)
+        TlsContext::new(&config, verifier)
             .with_client_cert(Certificate::X509(&cli_der[..]), &private_key),
     );
 
