@@ -82,7 +82,7 @@ fn test_blocking_borrowed() {
         &mut write_record_buffer,
     );
 
-    tls.open(TlsContext::new(&config))
+    tls.open(TlsContext::new(&config, NoVerify))
         .expect("error establishing TLS connection");
 
     let (mut reader, mut writer) = tls.split();

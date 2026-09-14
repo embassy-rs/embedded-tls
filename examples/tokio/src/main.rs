@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &mut write_record_buffer,
     );
 
-    tls.open(TlsContext::new(&config))
+    tls.open(TlsContext::new(&config, NoVerify))
         .await
     .expect("error establishing TLS connection");
 

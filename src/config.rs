@@ -255,40 +255,28 @@ impl defmt::Format for PrivateKey {
 
 /// Everything needed to open a connection: the configuration, the certificate verifier
 /// and, optionally, the client certificate and key for mutual authentication.
-///
-/// By default no certificate verification is performed ([`NoVerify`]); use
-/// [`with_verifier`](Self::with_verifier) to verify the server certificate chain.
 #[derive(Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct TlsContext<'a, Verifier = NoVerify> {
+pub struct TlsContext<'a, Verifier> {
     pub(crate) config: &'a TlsConfig<'a>,
     pub(crate) verifier: Verifier,
     pub(crate) client_cert: Option<Certificate<&'a [u8]>>,
     pub(crate) private_key: Option<&'a PrivateKey>,
 }
 
-impl<'a> TlsContext<'a> {
-    /// Create a new context with a given config and no certificate verification.
+impl<'a, Verifier> TlsContext<'a, Verifier> {
+    /// Create a new context with a given config, using `verifier` to verify the server
+    /// certificate and its signature.
+    ///
+    /// Pass [`NoVerify`] to skip certificate verification entirely. Only do that when the
+    /// server is authenticated by other means, such as a pre-shared key, or for testing.
     #[must_use]
-    pub fn new(config: &'a TlsConfig<'a>) -> Self {
+    pub fn new(config: &'a TlsConfig<'a>, verifier: Verifier) -> Self {
         Self {
             config,
-            verifier: NoVerify,
+            verifier,
             client_cert: None,
             private_key: None,
-        }
-    }
-}
-
-impl<'a, Verifier> TlsContext<'a, Verifier> {
-    /// Use `verifier` to verify the server certificate and its signature.
-    #[must_use]
-    pub fn with_verifier<V>(self, verifier: V) -> TlsContext<'a, V> {
-        TlsContext {
-            config: self.config,
-            verifier,
-            client_cert: self.client_cert,
-            private_key: self.private_key,
         }
     }
 

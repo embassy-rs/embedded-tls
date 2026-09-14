@@ -64,7 +64,7 @@ async fn test_server_certificate_validation() {
 
     let verifier: CertVerifier<Aes128GcmSha256, SystemTime, 4096> =
         CertVerifier::new(Certificate::X509(&der[..]));
-    let open_fut = tls.open(TlsContext::new(&config).with_verifier(verifier));
+    let open_fut = tls.open(TlsContext::new(&config, verifier));
 
     open_fut.await.expect("error establishing TLS connection");
 

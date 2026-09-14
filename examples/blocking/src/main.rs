@@ -37,7 +37,7 @@ fn main() {
 
     let verifier: CertVerifier<Aes128GcmSha256, SystemTime, 4096> =
         CertVerifier::new(Certificate::X509(&der));
-    tls.open(TlsContext::new(&config).with_verifier(verifier))
+    tls.open(TlsContext::new(&config, verifier))
         .expect("error establishing TLS connection");
 
     tls.write_all(b"ping").expect("error writing data");

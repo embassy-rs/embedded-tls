@@ -103,8 +103,7 @@ async fn test_server_certificate_validation() {
     let private_key =
         PrivateKey::Rsa(rsa::RsaPrivateKey::from_pkcs8_der(&key_der).expect("invalid private key"));
     let open_fut = tls.open(
-        TlsContext::new(&config)
-            .with_verifier(verifier)
+        TlsContext::new(&config, verifier)
             .with_client_cert(Certificate::X509(&cli_der[..]), &private_key),
     );
 

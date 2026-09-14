@@ -5,7 +5,7 @@ use embassy_net::{Config, Ipv4Address, Ipv4Cidr, Runner, StackResources};
 use embassy_net_tuntap::TunTapDevice;
 use embassy_time::Duration;
 use embedded_io_async::Write;
-use embedded_tls::{Aes128GcmSha256, TlsConfig, TlsConnection, TlsContext};
+use embedded_tls::{Aes128GcmSha256, NoVerify, TlsConfig, TlsConnection, TlsContext};
 use heapless::Vec;
 use log::*;
 use static_cell::StaticCell;
@@ -85,7 +85,7 @@ async fn main_task(spawner: Spawner) {
     let mut tls: TlsConnection<_, Aes128GcmSha256> =
         TlsConnection::new(socket, &mut read_record_buffer, &mut write_record_buffer);
 
-    tls.open(TlsContext::new(&config))
+    tls.open(TlsContext::new(&config, NoVerify))
         .await
     .expect("error establishing TLS connection");
 
