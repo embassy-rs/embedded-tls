@@ -14,6 +14,8 @@ The client supports both async and blocking modes. By default, the `std` feature
 
 To use the async mode, import `embedded_tls::*`. To use the blocking mode, import `embedded_tls::blocking::*`.
 
+Embedded-TLS uses `embassy-crypto` for all cryptography and RNG (except RSA). You must add dependencies providing implementations. See the [`embassy-crypto` README](https://docs.embassy.dev/embassy-crypto) for details.
+
 Some features and extensions are not yet implemented, have a look at [open issues](https://github.com/embassy-rs/embedded-tls/issues).
 
 Only supports writing/receiving one frame at a time, hence using a frame buffer larger than 16k is not currently needed.  You may use a lower frame buffer size, but there is no guarantee that it will be able to parse any TLS 1.3 frame.

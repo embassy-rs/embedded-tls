@@ -1,10 +1,10 @@
 #![macro_use]
 use embedded_io::{Read, Write};
 use embedded_io_adapters::std::FromStd;
-use rand_core::OsRng;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Once;
 
+mod common;
 mod tlsserver;
 
 static INIT: Once = Once::new();
@@ -76,17 +76,14 @@ fn test_blocking_borrowed() {
     let mut write_record_buffer = [0; 16384];
     let config = TlsConfig::new().with_server_name("localhost");
 
-    let mut tls = TlsConnection::new(
+    let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
         Clonable(Arc::new(stream)),
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
 
-    tls.open(TlsContext::new(
-        &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ))
-    .expect("error establishing TLS connection");
+    tls.open(TlsContext::new(&config, NoVerify))
+        .expect("error establishing TLS connection");
 
     let (mut reader, mut writer) = tls.split();
 

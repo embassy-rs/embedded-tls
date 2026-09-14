@@ -2,7 +2,6 @@
 use embedded_io_adapters::tokio_1::FromTokio;
 use embedded_tls::*;
 use openssl::ssl;
-use rand::rngs::OsRng;
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::net::TcpListener;
@@ -13,6 +12,7 @@ use tokio::time::Duration;
 use tokio::time::timeout;
 
 static INIT: Once = Once::new();
+mod common;
 
 fn setup() -> (SocketAddr, JoinHandle<()>) {
     INIT.call_once(|| {
@@ -75,20 +75,13 @@ async fn test_psk_open() {
             .with_psk(&[0xaa, 0xbb, 0xcc, 0xdd], &[b"vader"])
             .with_server_name("localhost");
 
-        let mut tls = TlsConnection::new(
+        let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
             FromTokio::new(stream),
             &mut read_record_buffer,
             &mut write_record_buffer,
         );
 
-        assert!(
-            tls.open(TlsContext::new(
-                &config,
-                UnsecureProvider::new::<Aes128GcmSha256>(OsRng)
-            ))
-            .await
-            .is_ok()
-        );
+        assert!(tls.open(TlsContext::new(&config, NoVerify)).await.is_ok());
         println!("TLS session opened");
 
         tls.write(b"ping").await.unwrap();

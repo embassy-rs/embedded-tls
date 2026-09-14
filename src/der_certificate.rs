@@ -28,6 +28,7 @@ impl<'a> defmt::Format for AlgorithmIdentifier<'a> {
     }
 }
 
+#[cfg(feature = "p256")]
 pub const ECDSA_SHA256: AlgorithmIdentifier = AlgorithmIdentifier {
     oid: ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2"),
     parameters: None,

@@ -1,12 +1,12 @@
 use crate::TlsError;
 use crate::application_data::ApplicationData;
+use crate::buffer::CryptoBuffer;
 use crate::change_cipher_spec::ChangeCipherSpec;
 use crate::config::{TlsCipherSuite, TlsConfig};
 use crate::content_types::ContentType;
 use crate::handshake::client_hello::ClientHello;
 use crate::handshake::{ClientHandshake, ServerHandshake};
 use crate::key_schedule::WriteKeySchedule;
-use crate::{CryptoProvider, buffer::CryptoBuffer};
 use crate::{
     alert::{Alert, AlertDescription, AlertLevel},
     parse_buffer::ParseBuffer,
@@ -90,17 +90,11 @@ where
         }
     }
 
-    pub fn client_hello<Provider>(
-        config: &'config TlsConfig<'config>,
-        provider: &mut Provider,
-    ) -> Self
-    where
-        Provider: CryptoProvider,
-    {
-        ClientRecord::Handshake(
-            ClientHandshake::ClientHello(ClientHello::new(config, provider)),
+    pub fn client_hello(config: &'config TlsConfig<'config>) -> Result<Self, TlsError> {
+        Ok(ClientRecord::Handshake(
+            ClientHandshake::ClientHello(ClientHello::new(config)?),
             false,
-        )
+        ))
     }
 
     pub fn close_notify(opened: bool) -> Self {

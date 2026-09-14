@@ -12,57 +12,47 @@ keywords = ["embedded", "async", "tls", "no_std", "network"]
 exclude = [".github"]
 
 [package.metadata.docs.rs]
-features = ["webpki", "rustpki", "rsa", "ed25519", "p384"]
+features = ["webpki", "rustpki", "rsa", "ed25519", "p256", "p384"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
+embassy-crypto = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", rev = "9345ed463886cf964c0c33fc0af90a9ffbd4cb60" }
 portable-atomic = { version = "1.6.0", default-features = false }
-p256 = { version = "0.13", default-features = false, features = [ "ecdh", "ecdsa", "sha256" ] }
-p384 = { version = "0.13", default-features = false, features = [ "ecdsa", "sha384" ], optional = true }
-ed25519-dalek = { version = "2.2", default-features = false, optional = true }
 rsa = { version = "0.9.9", default-features = false, features = ["sha2"], optional = true }
-rand_core = { version = "0.6.3", default-features = false }
-hkdf = "0.12.3"
-hmac = "0.12.1"
-sha2 = { version = "0.10.2", default-features = false }
-aes-gcm = { version = "0.10.1", default-features = false, features = ["aes"] }
-digest = { version = "0.10.3", default-features = false, features = [ "core-api" ] }
-typenum = { version = "1.15.0", default-features = false }
 heapless = { version = "0.9", default-features = false }
 embedded-io = "0.7"
 embedded-io-async = "0.7"
 embedded-io-adapters = { version = "0.7", optional = true }
-generic-array = { version = "0.14", default-features = false }
 webpki = { package = "rustls-webpki", version = "0.101.7", default-features = false, optional = true }
-const-oid = { version = "0.10.1", optional = true }
-der = { version = "0.8.1", features = ["derive", "oid", "heapless"], optional = true }
-signature = { version = "2.2", default-features = false }
-ecdsa = { version = "0.16.9", default-features = false }
+der = { version = "0.8", features = ["derive", "oid", "heapless"] }
 
 # Logging alternatives
 log = { version = "0.4", optional = true }
 defmt = { version = "1.0.1", optional = true }
 
 [dev-dependencies]
+embassy-crypto-rustcrypto = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", rev = "9345ed463886cf964c0c33fc0af90a9ffbd4cb60", features = ["all"] }
+embassy-crypto-rand = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", rev = "9345ed463886cf964c0c33fc0af90a9ffbd4cb60" }
 env_logger = "0.11"
 tokio = { version = "1", features = ["full"] }
 mio = { version = "0.8.3", features = ["os-poll", "net"] }
 rustls = "0.21.6"
 rustls-pemfile = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-rand = "0.8"
 log = "0.4"
 pem-parser = "0.1.1"
 openssl = "0.10.44"
 
 [features]
 default = ["std", "log", "tokio"]
-defmt = ["dep:defmt", "embedded-io/defmt", "heapless/defmt"]
+defmt = ["dep:defmt", "embedded-io/defmt", "heapless/defmt", "embassy-crypto/defmt"]
 std = ["embedded-io/std", "embedded-io-async/std"]
 tokio = ["embedded-io-adapters/tokio-1"]
-alloc = []
+# webpki's RSA support lives behind its `alloc` feature, which in 0.101 also needs its `std`.
+alloc = ["webpki?/std"]
 webpki = ["dep:webpki"]
-rustpki = ["dep:der","dep:const-oid"]
+rustpki = []
 rsa = ["dep:rsa", "rustpki", "alloc"]
-ed25519 = ["dep:ed25519-dalek", "rustpki"]
-p384 = ["dep:p384", "rustpki"]
+ed25519 = []
+p256 = []
+p384 = []

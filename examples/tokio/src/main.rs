@@ -3,9 +3,13 @@
 use embedded_io_adapters::tokio_1::FromTokio;
 use embedded_io_async::Write as _;
 use embedded_tls::*;
-use rand::rngs::OsRng;
 use std::error::Error;
 use tokio::net::TcpStream;
+
+// All cryptography is served by `embassy-crypto` drivers, resolved at link time: link the
+// software drivers and the operating system random number generator.
+use embassy_crypto_rand as _;
+use embassy_crypto_rustcrypto as _;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -17,17 +21,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut read_record_buffer = [0; 16384];
     let mut write_record_buffer = [0; 16384];
     let config = TlsConfig::new().with_server_name("localhost");
-    let mut tls = TlsConnection::new(
+    let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
         FromTokio::new(stream),
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
 
-    tls.open(TlsContext::new(
-        &config,
-        UnsecureProvider::new::<Aes128GcmSha256>(OsRng),
-    ))
-    .await
+    tls.open(TlsContext::new(&config, NoVerify))
+        .await
     .expect("error establishing TLS connection");
 
     tls.write_all(b"ping").await.expect("error writing data");
