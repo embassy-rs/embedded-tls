@@ -29,9 +29,26 @@ pub struct KeyShareClientHello<'a, const N: usize> {
 impl<'a, const N: usize> KeyShareClientHello<'a, N> {
     pub fn parse(buf: &mut ParseBuffer<'a>) -> Result<Self, ParseError> {
         let len = buf.read_u16()? as usize;
-        Ok(KeyShareClientHello {
-            client_shares: buf.read_list(len, KeyShareEntry::parse)?,
-        })
+        let mut data = buf.slice(len)?;
+        let mut client_shares = Vec::new();
+        // Skip key shares with unknown groups (e.g. GREASE, unrecognised PQ hybrids)
+        // per RFC 8446 §4.2.8: "the server MUST check ... that it is willing to
+        // negotiate ... and ignore all others."
+        while !data.is_empty() {
+            let group_raw = data.read_u16()?;
+            let opaque_len = data.read_u16()? as usize;
+            let opaque = data.slice(opaque_len)?;
+            match NamedGroup::of(group_raw) {
+                Some(group) => {
+                    let _ = client_shares.push(KeyShareEntry {
+                        group,
+                        opaque: opaque.as_slice(),
+                    });
+                }
+                None => {} // unknown group, skip
+            }
+        }
+        Ok(KeyShareClientHello { client_shares })
     }
 
     pub fn encode(&self, buf: &mut CryptoBuffer) -> Result<(), TlsError> {

@@ -1,3 +1,5 @@
+#[cfg(feature = "server")]
+use crate::crypto::TlsHash;
 use crate::{
     TlsError,
     buffer::CryptoBuffer,
@@ -105,6 +107,28 @@ impl<'a> WriteBuffer<'a> {
             record,
             write_key_schedule,
             read_key_schedule,
+        )
+    }
+
+    #[cfg(feature = "server")]
+    pub fn write_handshake_record<CipherSuite>(
+        &mut self,
+        encrypted: bool,
+        write_key_schedule: &mut WriteKeySchedule<CipherSuite>,
+        transcript: &mut CipherSuite::Hash,
+        encode: impl FnOnce(&mut CryptoBuffer<'_>) -> Result<(), TlsError>,
+    ) -> Result<&[u8], TlsError>
+    where
+        CipherSuite: TlsCipherSuite,
+    {
+        write_handshake_record_inner(
+            self.buffer,
+            &mut self.pos,
+            &mut self.current_header,
+            encrypted,
+            write_key_schedule,
+            transcript,
+            encode,
         )
     }
 }
@@ -283,5 +307,39 @@ where
         record.finish_record(&mut buf, transcript, write_key_schedule)?;
         Ok(buf.rewind())
     })?;
+    close_record(buffer, pos, current_header, write_key_schedule)
+}
+
+#[cfg(feature = "server")]
+fn write_handshake_record_inner<'a, CipherSuite>(
+    buffer: &'a mut [u8],
+    pos: &mut usize,
+    current_header: &mut Option<ClientRecordHeader>,
+    encrypted: bool,
+    write_key_schedule: &mut WriteKeySchedule<CipherSuite>,
+    transcript: &mut CipherSuite::Hash,
+    encode: impl FnOnce(&mut CryptoBuffer<'_>) -> Result<(), TlsError>,
+) -> Result<&'a [u8], TlsError>
+where
+    CipherSuite: TlsCipherSuite,
+{
+    if current_header.is_some() {
+        return Err(TlsError::InternalError);
+    }
+
+    let header = ClientRecordHeader::Handshake(encrypted);
+    start_record(buffer, pos, current_header, header)?;
+
+    with_buffer(buffer, pos, |buf| {
+        let mut buf = buf.forward();
+        encode(&mut buf)?;
+
+        // Update transcript with the plaintext handshake bytes
+        let enc_buf = buf.as_slice();
+        transcript.update(enc_buf);
+
+        Ok(buf.rewind())
+    })?;
+
     close_record(buffer, pos, current_header, write_key_schedule)
 }

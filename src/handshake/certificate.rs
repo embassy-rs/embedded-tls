@@ -14,6 +14,7 @@ pub struct CertificateRef<'a> {
 }
 
 impl<'a> CertificateRef<'a> {
+    #[must_use]
     pub fn with_context(request_context: &'a [u8]) -> Self {
         Self {
             raw_entries: &[],

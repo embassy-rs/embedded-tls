@@ -46,7 +46,7 @@ impl ClientRecordHeader {
     pub fn header_content_type(self) -> ContentType {
         match self {
             Self::Handshake(false) => ContentType::Handshake,
-            Self::Alert(false) => ContentType::ChangeCipherSpec,
+            Self::Alert(false) => ContentType::Alert,
             Self::Handshake(true) | Self::Alert(true) | Self::ApplicationData => {
                 ContentType::ApplicationData
             }
