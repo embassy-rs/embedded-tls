@@ -5,7 +5,29 @@
     clippy::module_name_repetitions,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::missing_errors_doc // TODO
+    clippy::missing_errors_doc, // TODO
+    clippy::derivable_impls,
+    clippy::doc_markdown,
+    clippy::elidable_lifetime_names,
+    clippy::empty_line_after_doc_comments,
+    clippy::extra_unused_lifetimes,
+    clippy::manual_ignore_case_cmp,
+    clippy::manual_let_else,
+    clippy::match_bool,
+    clippy::needless_pass_by_value,
+    clippy::needless_range_loop,
+    clippy::non_minimal_cfg,
+    clippy::ref_option,
+    clippy::similar_names,
+    clippy::single_match,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::unnecessary_mut_passed,
+    clippy::unnecessary_semicolon,
+    clippy::unnecessary_wraps,
+    clippy::collapsible_if,
+    clippy::items_after_statements,
+    clippy::unnecessary_unwrap
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
@@ -77,11 +99,21 @@ mod parse_buffer;
 pub mod read_buffer;
 mod record;
 mod record_reader;
+#[cfg(feature = "server")]
+pub(crate) mod server;
+#[cfg(feature = "server")]
+mod server_config;
+#[cfg(feature = "server")]
+mod server_handshake;
+#[cfg(all(feature = "server", feature = "rustpki"))]
+mod server_verify;
 mod write_buffer;
 
 pub use embassy_crypto;
 pub use extensions::extension_data::signature_algorithms::SignatureScheme;
 pub use handshake::certificate_verify::CertificateVerify;
+#[cfg(feature = "server")]
+pub use server_config::{TlsServerConfig, TlsServerContext};
 
 #[cfg(feature = "webpki")]
 pub mod webpki;
