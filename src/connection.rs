@@ -17,7 +17,12 @@ use embedded_io_async::{Read as AsyncRead, Write as AsyncWrite};
 
 use crate::application_data::ApplicationData;
 use crate::buffer::CryptoBuffer;
+#[cfg(not(feature = "x25519"))]
 use embassy_crypto::p256::SecretKey;
+#[cfg(feature = "x25519")]
+use embassy_crypto::x25519::SecretKey;
+#[cfg(feature = "mlkem")]
+use ml_kem::{DecapsulationKey, MlKem768};
 
 use crate::content_types::ContentType;
 use crate::parse_buffer::ParseBuffer;
@@ -136,6 +141,8 @@ where
     traffic_hash: Option<CipherSuite::Hash>,
     secret: Option<SecretKey>,
     certificate_request: Option<CertificateRequest>,
+    #[cfg(feature = "mlkem")]
+    kem: Option<DecapsulationKey<MlKem768>>,
 }
 
 impl<CipherSuite> Handshake<CipherSuite>
@@ -147,6 +154,8 @@ where
             traffic_hash: None,
             secret: None,
             certificate_request: None,
+            #[cfg(feature = "mlkem")]
+            kem: None,
         }
     }
 }
@@ -399,6 +408,8 @@ where
 
     if let ClientRecord::Handshake(ClientHandshake::ClientHello(client_hello), _) = client_hello {
         handshake.secret.replace(client_hello.secret);
+        #[cfg(feature = "mlkem")]
+        handshake.kem.replace(client_hello.kem);
         Ok((State::ServerHello, slice))
     } else {
         Err(TlsError::EncodeError)
@@ -418,10 +429,16 @@ where
             ServerHandshake::ServerHello(server_hello) => {
                 trace!("********* ServerHello");
                 let secret = handshake.secret.take().ok_or(TlsError::InvalidHandshake)?;
+                #[cfg(feature = "mlkem")]
+                let kem = handshake.kem.take().ok_or(TlsError::InvalidHandshake)?;
                 let shared = server_hello
-                    .calculate_shared_secret(&secret)
+                    .calculate_shared_secret(
+                        &secret,
+                        #[cfg(feature = "mlkem")]
+                        &kem,
+                    )
                     .ok_or(TlsError::InvalidKeyShare)?;
-                key_schedule.initialize_handshake_secret(shared.as_bytes())?;
+                key_schedule.initialize_handshake_secret(&shared)?;
                 Ok(State::ServerVerify)
             }
             _ => Err(TlsError::InvalidHandshake),
