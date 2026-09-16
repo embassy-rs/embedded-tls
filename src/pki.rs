@@ -163,7 +163,7 @@ where
     }
 }
 
-fn verify_signature(
+pub(crate) fn verify_signature(
     message: &[u8],
     certificate: &ServerCertificate,
     verify: &CertificateVerifyRef,
@@ -288,7 +288,7 @@ fn get_cert_time(time: Time) -> u64 {
     }
 }
 
-fn verify_certificate(
+pub(crate) fn verify_certificate(
     verifier: &CertificateEntryRef,
     certificate: &CertificateEntryRef,
     now: Option<u64>,

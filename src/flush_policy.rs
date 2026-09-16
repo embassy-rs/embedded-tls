@@ -24,6 +24,7 @@ impl FlushPolicy {
     /// Returns true when the transport delegate should be explicitly flushed.
     ///
     /// Relaxed -> false, Strict -> true.
+    #[must_use]
     pub fn flush_transport(&self) -> bool {
         matches!(self, Self::Strict)
     }

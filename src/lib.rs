@@ -75,11 +75,21 @@ mod parse_buffer;
 pub mod read_buffer;
 mod record;
 mod record_reader;
+#[cfg(feature = "server")]
+pub(crate) mod server;
+#[cfg(feature = "server")]
+mod server_config;
+#[cfg(feature = "server")]
+mod server_handshake;
+#[cfg(all(feature = "server", feature = "rustpki"))]
+mod server_verify;
 mod write_buffer;
 
 pub use embassy_crypto;
 pub use extensions::extension_data::signature_algorithms::SignatureScheme;
 pub use handshake::certificate_verify::CertificateVerify;
+#[cfg(feature = "server")]
+pub use server_config::{TlsServerConfig, TlsServerContext};
 
 #[cfg(feature = "webpki")]
 pub mod webpki;
