@@ -35,9 +35,6 @@ where
     pub(crate) config: &'config TlsConfig<'config>,
     random: Random,
     cipher_suite: PhantomData<CipherSuite>,
-    #[cfg(not(feature = "x25519"))]
-    pub(crate) secret: SecretKey,
-    #[cfg(feature = "x25519")]
     pub(crate) secret: SecretKey,
     #[cfg(feature = "mlkem")]
     pub(crate) kem: DecapsulationKey<MlKem768>,
