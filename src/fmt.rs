@@ -192,10 +192,12 @@ macro_rules! unwrap {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct NoneError;
 
+#[allow(dead_code)]
 pub trait Try {
     type Ok;
     type Error;

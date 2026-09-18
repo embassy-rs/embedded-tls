@@ -129,17 +129,17 @@ where
             let candidate = match ParsedCertificate::from_der(der) {
                 Ok(candidate) => candidate,
                 Err(err) => {
-                    warn!("Invalid certificate {err:?}");
+                    warn!("Invalid certificate {:?}", err);
                     // Ignore invalid certificates
-                    continue
-                },
+                    continue;
+                }
             };
 
             // Validate certificate time if we have a clock
             match now {
                 Some(time) => {
                     if !is_valid_at(&candidate.decoded, time) {
-                        warn!("Certificate is not valid at time {time}");
+                        warn!("Certificate is not valid at time {}", time);
                         continue;
                     }
                 }
@@ -174,7 +174,7 @@ where
                         trusted_certs
                             .push(certificate)
                             .map_err(|_| TlsError::InsufficientSpace)?;
-                    },
+                    }
                     // A failure to validate an intermediate certificate can be ignored
                     // (see note above).
                     CertificateVerification::DoesNotCertify => idx += 1,
@@ -194,7 +194,7 @@ where
                     error!("End-entity certificate is outside of its validity period");
                     return Err(TlsError::InvalidCertificate);
                 }
-            },
+            }
             None => warn!("No time provided, could not check end-entity certificate's validity"),
         }
 
@@ -277,9 +277,7 @@ fn verify_signature(
             verify_ecdsa_p384(public_key, message, verify.signature).is_ok()
         }
         #[cfg(feature = "ed25519")]
-        SignatureScheme::Ed25519 => {
-            verify_ed25519(public_key, message, verify.signature).is_ok()
-        }
+        SignatureScheme::Ed25519 => verify_ed25519(public_key, message, verify.signature).is_ok(),
         #[cfg(feature = "rsa")]
         SignatureScheme::RsaPssRsaeSha256 => {
             use rsa::sha2::Sha256;
@@ -379,6 +377,9 @@ struct ParsedCertificate<'a> {
 impl<'a> ParsedCertificate<'a> {
     fn from_der(der: &'a [u8]) -> Result<Self, TlsError> {
         let decoded = DecodedCertificate::from_der(der).map_err(|err| {
+            #[cfg(feature = "defmt")]
+            warn!("Failed to decode certificate: {:?}", Debug2Format(&err));
+            #[cfg(not(feature = "defmt"))]
             warn!("Failed to decode certificate: {:?}", err);
             TlsError::DecodeError
         })?;
@@ -389,7 +390,6 @@ impl<'a> ParsedCertificate<'a> {
         Ok(Self { decoded, tbs_der })
     }
 }
-
 
 enum CertificateVerification {
     DoesNotCertify,
@@ -417,9 +417,13 @@ fn certified_by_any(
     // .. so we start with the most recently added certificate :)
     for trusted in trusted_certs.iter().rev() {
         match verify_certificate(trusted, certificate) {
-            Ok(CertificateVerification::Certifies) => { return CertificateVerification::Certifies; }
+            Ok(CertificateVerification::Certifies) => {
+                return CertificateVerification::Certifies;
+            }
             Ok(CertificateVerification::DoesNotCertify) => {}
-            Err(err) => { debug!("Failed to verify certificate: {err}"); },
+            Err(err) => {
+                debug!("Failed to verify certificate: {}", err);
+            }
         }
     }
 
@@ -767,7 +771,10 @@ mod cert_verifier_tests {
         let client_cert = pem_parser::pem_to_der(include_str!("../tests/data/client-cert.pem"));
         let ca = pem_parser::pem_to_der(include_str!("../tests/data/ca-cert.pem"));
 
-        let result = verify(&ca, &[&server_cert, &other_root, &client_cert, &intermediate]);
+        let result = verify(
+            &ca,
+            &[&server_cert, &other_root, &client_cert, &intermediate],
+        );
         assert!(result.is_ok(), "{:?}", result.err());
     }
 
