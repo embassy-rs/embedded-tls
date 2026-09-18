@@ -1,4 +1,3 @@
-#![macro_use]
 use embedded_io::BufRead as _;
 use embedded_io_adapters::{std::FromStd, tokio_1::FromTokio};
 use embedded_io_async::BufRead as _;
