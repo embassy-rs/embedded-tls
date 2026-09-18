@@ -9,8 +9,8 @@ authors = [
 
 [dependencies]
 embedded-tls = { path = "../..", features = ["log", "tokio"] }
-embassy-crypto-rand = { git = "https://github.com/embassy-rs/embassy", rev = "9345ed463886cf964c0c33fc0af90a9ffbd4cb60" }
-embassy-crypto-rustcrypto = { git = "https://github.com/embassy-rs/embassy", rev = "9345ed463886cf964c0c33fc0af90a9ffbd4cb60", features = ["embassy-crypto-sha256", "embassy-crypto-hmac-sha256", "embassy-crypto-aes128-gcm", "embassy-crypto-p256-ecdh", "embassy-crypto-p256-ecdsa"] }
+embassy-crypto-rand = { git = "https://github.com/embassy-rs/embassy", rev = "822a76ea91f2c0885c6eb0c65fe91181e31133e1" }
+embassy-crypto-rustcrypto = { git = "https://github.com/embassy-rs/embassy", rev = "822a76ea91f2c0885c6eb0c65fe91181e31133e1", features = ["embassy-crypto-sha256", "embassy-crypto-hmac-sha256", "embassy-crypto-aes128-gcm", "embassy-crypto-p256-ecdh", "embassy-crypto-p256-ecdsa"] }
 embedded-io-adapters = { version = "0.7", features = ["tokio-1"] }
 embedded-io-async = "0.7"
 env_logger = "0.10"

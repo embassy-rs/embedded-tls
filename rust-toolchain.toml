@@ -3,4 +3,4 @@
 [toolchain]
 channel = "stable"
 components = [ "rustfmt", "clippy" ]
-targets = [ "thumbv7em-none-eabi" ]
+targets = [ "thumbv7em-none-eabi", "thumbv8m.main-none-eabihf" ]
