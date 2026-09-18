@@ -1,0 +1,140 @@
+name: Size report
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  EXAMPLE: examples/stm32h5
+  ELF: examples/stm32h5/target/thumbv8m.main-none-eabihf/release/eth
+
+jobs:
+  size-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR branch
+        uses: actions/checkout@v4
+
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: base
+
+      - name: Install Rust target and llvm-tools
+        run: |
+          rustup target add thumbv8m.main-none-eabihf
+          rustup component add llvm-tools
+
+      - name: Build (PR)
+        working-directory: ${{ env.EXAMPLE }}
+        run: cargo build --release
+
+      - name: Build (main)
+        id: base
+        run: |
+          if [ -d "base/$EXAMPLE" ]; then
+            (cd "base/$EXAMPLE" && cargo build --release)
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Measure sizes
+        id: sizes
+        run: |
+          LLVM_SIZE=$(find "$(rustc --print sysroot)" -name llvm-size | head -n1)
+          measure() { "$LLVM_SIZE" -A "$1" | awk -v sec="$2" '$1 == sec { print $2 }'; }
+          echo "pr_text=$(measure "$ELF" .text)" >> "$GITHUB_OUTPUT"
+          echo "pr_bss=$(measure "$ELF" .bss)" >> "$GITHUB_OUTPUT"
+          if [ "${{ steps.base.outputs.present }}" = "true" ]; then
+            echo "main_text=$(measure "base/$ELF" .text)" >> "$GITHUB_OUTPUT"
+            echo "main_bss=$(measure "base/$ELF" .bss)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post report
+        uses: actions/github-script@v7
+        env:
+          HAS_BASE: ${{ steps.base.outputs.present }}
+          PR_TEXT: ${{ steps.sizes.outputs.pr_text }}
+          PR_BSS: ${{ steps.sizes.outputs.pr_bss }}
+          MAIN_TEXT: ${{ steps.sizes.outputs.main_text }}
+          MAIN_BSS: ${{ steps.sizes.outputs.main_bss }}
+        with:
+          script: |
+            const marker = '<!-- embedded-tls-size-report -->';
+            const hasBase = process.env.HAS_BASE === 'true';
+            const pr = { text: Number(process.env.PR_TEXT), bss: Number(process.env.PR_BSS) };
+            const main = hasBase
+              ? { text: Number(process.env.MAIN_TEXT), bss: Number(process.env.MAIN_BSS) }
+              : null;
+
+            const fmt = (n) => n.toLocaleString('en-US');
+            const delta = (base, head) => {
+              const d = head - base;
+              if (d === 0) return '0';
+              const pct = base === 0 ? '' : ` (${d > 0 ? '+' : ''}${((d / base) * 100).toFixed(2)}%)`;
+              return `${d > 0 ? '+' : ''}${fmt(d)}${pct}`;
+            };
+
+            const rows = [
+              ['`.text` (flash)', 'text'],
+              ['`.bss` (RAM)', 'bss'],
+            ];
+            let table = '| Section | main | PR | Δ |\n|---|---:|---:|---:|\n';
+            for (const [label, key] of rows) {
+              const baseCol = main ? fmt(main[key]) : 'n/a';
+              const deltaCol = main ? delta(main[key], pr[key]) : 'n/a';
+              table += `| ${label} | ${baseCol} | ${fmt(pr[key])} | ${deltaCol} |\n`;
+            }
+
+            let verdict;
+            if (!main) {
+              verdict = 'ℹ️ No baseline: `${{ env.EXAMPLE }}` does not exist on `main` yet.';
+            } else if (pr.text === main.text && pr.bss === main.bss) {
+              verdict = '✅ Looks good: no size changes.';
+            } else {
+              verdict = '⚠️ Sizes changed compared to `main` — review the numbers above.';
+            }
+
+            const body = [
+              marker,
+              '## Binary size report',
+              '',
+              'Built from `${{ env.EXAMPLE }}` (bin `eth`, `thumbv8m.main-none-eabihf`, release).',
+              '',
+              table,
+              verdict,
+            ].join('\n');
+
+            await core.summary.addRaw(body).write();
+
+            try {
+              const { data: comments } = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+              });
+              const existing = comments.find((c) => c.body.includes(marker));
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                  body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body,
+                });
+              }
+            } catch (error) {
+              // PRs from forks run with a read-only token; the report is still in the job summary.
+              core.warning(`Could not post PR comment: ${error.message}`);
+            }

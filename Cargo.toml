@@ -16,7 +16,7 @@ features = ["webpki", "rustpki", "rsa", "ed25519", "p256", "p384", "x25519", "ml
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-embassy-crypto = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", rev = "9345ed463886cf964c0c33fc0af90a9ffbd4cb60" }
+embassy-crypto = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", rev = "822a76ea91f2c0885c6eb0c65fe91181e31133e1" }
 portable-atomic = { version = "1.6.0", default-features = false }
 rsa = { version = "0.9.9", default-features = false, features = ["sha2"], optional = true }
 heapless = { version = "0.9", default-features = false }
@@ -33,8 +33,8 @@ log = { version = "0.4", optional = true }
 defmt = { version = "1.0.1", optional = true }
 
 [dev-dependencies]
-embassy-crypto-rustcrypto = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", rev = "9345ed463886cf964c0c33fc0af90a9ffbd4cb60", features = ["all"] }
-embassy-crypto-rand = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", rev = "9345ed463886cf964c0c33fc0af90a9ffbd4cb60" }
+embassy-crypto-rustcrypto = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", rev = "822a76ea91f2c0885c6eb0c65fe91181e31133e1", features = ["all"] }
+embassy-crypto-rand = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", rev = "822a76ea91f2c0885c6eb0c65fe91181e31133e1" }
 env_logger = "0.11"
 tokio = { version = "1", features = ["full"] }
 mio = { version = "0.8.3", features = ["os-poll", "net"] }
