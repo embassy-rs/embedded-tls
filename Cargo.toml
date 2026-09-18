@@ -12,7 +12,7 @@ keywords = ["embedded", "async", "tls", "no_std", "network"]
 exclude = [".github"]
 
 [package.metadata.docs.rs]
-features = ["webpki", "rustpki", "rsa", "ed25519", "p256", "p384"]
+features = ["webpki", "rustpki", "rsa", "ed25519", "p256", "p384", "x25519", "mlkem"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
@@ -25,6 +25,8 @@ embedded-io-async = "0.7"
 embedded-io-adapters = { version = "0.7", optional = true }
 webpki = { package = "rustls-webpki", version = "0.101.7", default-features = false, optional = true }
 der = { version = "0.8", features = ["derive", "oid", "heapless"] }
+dhkem = { version = "0.1.0", default-features = false, optional = true }
+ml-kem = { version = "0.3.2", default-features = false, optional = true }
 
 # Logging alternatives
 log = { version = "0.4", optional = true }
@@ -56,3 +58,5 @@ rsa = ["dep:rsa", "rustpki", "alloc"]
 ed25519 = []
 p256 = []
 p384 = []
+x25519 = []
+mlkem = ["dep:dhkem", "dep:ml-kem"]

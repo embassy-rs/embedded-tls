@@ -318,7 +318,14 @@ impl<'a> TlsConfig<'a> {
         );
         unwrap!(config.signature_schemes.push(SignatureScheme::Ed25519).ok());
 
+        #[cfg(not(feature = "x25519"))]
         unwrap!(config.named_groups.push(NamedGroup::Secp256r1));
+        #[cfg(all(not(feature = "x25519"), feature = "mlkem"))]
+        unwrap!(config.named_groups.push(NamedGroup::SecP256r1MLKEM768));
+        #[cfg(feature = "x25519")]
+        unwrap!(config.named_groups.push(NamedGroup::X25519));
+        #[cfg(all(feature = "x25519", feature = "mlkem"))]
+        unwrap!(config.named_groups.push(NamedGroup::X25519MLKEM768));
 
         config
     }
