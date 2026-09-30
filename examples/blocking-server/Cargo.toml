@@ -1,0 +1,14 @@
+[package]
+name = "tls-server-blocking"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+embedded-tls = { path = "../..", features = ["log", "server", "p256"] }
+embassy-crypto-rustcrypto = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", rev = "9345ed463886cf964c0c33fc0af90a9ffbd4cb60", features = ["all"] }
+embassy-crypto-rand = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", rev = "9345ed463886cf964c0c33fc0af90a9ffbd4cb60" }
+embedded-io = "0.7"
+embedded-io-adapters = { version = "0.7", features = ["std"] }
+env_logger = "0.10"
+log = "0.4"
+rustls-pemfile = "1"

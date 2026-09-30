@@ -5,6 +5,8 @@ use crate::handshake::certificate::CertificateRef;
 use crate::handshake::certificate_request::CertificateRequestRef;
 use crate::handshake::certificate_verify::{CertificateVerify, CertificateVerifyRef};
 use crate::handshake::client_hello::ClientHello;
+#[cfg(feature = "server")]
+use crate::handshake::client_hello::ParsedClientHello;
 use crate::handshake::encrypted_extensions::EncryptedExtensions;
 use crate::handshake::finished::Finished;
 use crate::handshake::new_session_ticket::NewSessionTicket;
@@ -23,7 +25,7 @@ pub mod finished;
 pub mod new_session_ticket;
 pub mod server_hello;
 
-const LEGACY_VERSION: u16 = 0x0303;
+pub(crate) const LEGACY_VERSION: u16 = 0x0303;
 
 type Random = [u8; 32];
 
@@ -126,6 +128,8 @@ where
 
 #[allow(clippy::large_enum_variant)]
 pub enum ServerHandshake<'a, CipherSuite: TlsCipherSuite> {
+    #[cfg(feature = "server")]
+    ClientHello(ParsedClientHello<'a>),
     ServerHello(ServerHello<'a>),
     EncryptedExtensions(EncryptedExtensions<'a>),
     NewSessionTicket(NewSessionTicket<'a>),
@@ -139,6 +143,8 @@ impl<CipherSuite: TlsCipherSuite> ServerHandshake<'_, CipherSuite> {
     #[allow(dead_code)]
     pub fn handshake_type(&self) -> HandshakeType {
         match self {
+            #[cfg(feature = "server")]
+            ServerHandshake::ClientHello(_) => HandshakeType::ClientHello,
             ServerHandshake::ServerHello(_) => HandshakeType::ServerHello,
             ServerHandshake::EncryptedExtensions(_) => HandshakeType::EncryptedExtensions,
             ServerHandshake::NewSessionTicket(_) => HandshakeType::NewSessionTicket,
@@ -153,6 +159,8 @@ impl<CipherSuite: TlsCipherSuite> ServerHandshake<'_, CipherSuite> {
 impl<CipherSuite: TlsCipherSuite> Debug for ServerHandshake<'_, CipherSuite> {
     fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
         match self {
+            #[cfg(feature = "server")]
+            ServerHandshake::ClientHello(inner) => Debug::fmt(inner, f),
             ServerHandshake::ServerHello(inner) => Debug::fmt(inner, f),
             ServerHandshake::EncryptedExtensions(inner) => Debug::fmt(inner, f),
             ServerHandshake::Certificate(inner) => Debug::fmt(inner, f),
@@ -168,6 +176,8 @@ impl<CipherSuite: TlsCipherSuite> Debug for ServerHandshake<'_, CipherSuite> {
 impl<'a, CipherSuite: TlsCipherSuite> defmt::Format for ServerHandshake<'a, CipherSuite> {
     fn format(&self, f: defmt::Formatter<'_>) {
         match self {
+            #[cfg(feature = "server")]
+            ServerHandshake::ClientHello(inner) => defmt::write!(f, "ClientHello({:?})", inner),
             ServerHandshake::ServerHello(inner) => defmt::write!(f, "{}", inner),
             ServerHandshake::EncryptedExtensions(inner) => defmt::write!(f, "{}", inner),
             ServerHandshake::Certificate(inner) => defmt::write!(f, "{}", inner),
@@ -206,6 +216,13 @@ impl<'a, CipherSuite: TlsCipherSuite> ServerHandshake<'a, CipherSuite> {
 
         let handshake = match handshake_type {
             //HandshakeType::ClientHello => {}
+            #[cfg(feature = "server")]
+            HandshakeType::ClientHello => {
+                let mut ch_buf = buf
+                    .slice(content_len as usize)
+                    .map_err(|_| TlsError::InvalidHandshake)?;
+                ServerHandshake::ClientHello(ParsedClientHello::parse(&mut ch_buf)?)
+            }
             HandshakeType::ServerHello => ServerHandshake::ServerHello(ServerHello::parse(buf)?),
             HandshakeType::NewSessionTicket => {
                 ServerHandshake::NewSessionTicket(NewSessionTicket::parse(buf)?)

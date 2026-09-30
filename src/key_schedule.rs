@@ -319,6 +319,47 @@ where
         self.shared.derived()
     }
 
+    /// Server counterpart of [`Self::initialize_handshake_secret`].
+    ///
+    /// The traffic-secret labels are swapped: a server writes with
+    /// `s hs traffic` and reads with `c hs traffic`.
+    #[cfg(feature = "server")]
+    pub fn initialize_handshake_secret_server(&mut self, ikm: &[u8]) -> Result<(), TlsError> {
+        self.shared.initialize(ikm);
+
+        self.calculate_traffic_secrets(b"s hs traffic", b"c hs traffic")?;
+        self.shared.derived()
+    }
+
+    /// Server counterpart of [`Self::initialize_master_secret`], with the
+    /// traffic-secret labels swapped as above.
+    #[cfg(feature = "server")]
+    pub fn initialize_master_secret_server(&mut self) -> Result<(), TlsError> {
+        let zero = HashOutput::<CipherSuite>::zeroed();
+        self.shared.initialize(zero.as_ref());
+
+        self.calculate_traffic_secrets(b"s ap traffic", b"c ap traffic")?;
+        self.shared.derived()
+    }
+
+    /// Replace the transcript with the synthetic `message_hash` that a
+    /// HelloRetryRequest requires (RFC 8446 section 4.4.1): the running
+    /// transcript is hashed, and that digest becomes the body of a synthetic
+    /// handshake message which starts the new transcript.
+    #[cfg(feature = "server")]
+    pub fn replace_transcript_with_message_hash(&mut self) -> Result<(), TlsError> {
+        let hash = self.server_state.transcript_hash.clone().finalize();
+        self.server_state.transcript_hash = CipherSuite::Hash::new();
+
+        let len = hash.as_ref().len() as u32;
+        self.server_state.transcript_hash.update(&[0xFE]);
+        self.server_state
+            .transcript_hash
+            .update(&len.to_be_bytes()[1..]);
+        self.server_state.transcript_hash.update(hash.as_ref());
+        Ok(())
+    }
+
     fn calculate_traffic_secrets(
         &mut self,
         client_label: &[u8],

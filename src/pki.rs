@@ -55,6 +55,10 @@ where
 {
     ca: Certificate<&'a [u8]>,
     host: Option<heapless::String<64>>,
+    /// Whether a name mismatch fails verification. A server checking a client
+    /// certificate has no hostname to match, so it opts out rather than
+    /// failing closed on every certificate that carries a name.
+    match_hostname: bool,
     certificate_transcript: Option<CipherSuite::Hash>,
     certificate: Option<OwnedCertificate<CERT_SIZE>>,
     _clock: PhantomData<Clock>,
@@ -70,9 +74,25 @@ where
         Self {
             ca,
             host: None,
+            match_hostname: true,
             certificate_transcript: None,
             certificate: None,
             _clock: PhantomData,
+        }
+    }
+
+    /// Verify the chain, but perform no hostname matching.
+    ///
+    /// For a server checking a client certificate: a client certificate
+    /// carries no hostname the server can meaningfully check, and the default
+    /// no-hostname behaviour — accept only certificates with no CN and no SANs
+    /// — would reject every realistic client certificate.
+    #[cfg(feature = "server")]
+    #[must_use]
+    pub(crate) fn without_hostname_verification(ca: Certificate<&'a [u8]>) -> Self {
+        Self {
+            match_hostname: false,
+            ..Self::new(ca)
         }
     }
 }
@@ -219,7 +239,7 @@ where
             names.common_name, names.san_dns_names
         );
 
-        if !tls_hostname_match(&names, &self.host) {
+        if self.match_hostname && !tls_hostname_match(&names, &self.host) {
             error!(
                 "Hostname ({:?}) does not match certificate names (CN={:?}, SANs={:?})",
                 self.host, names.common_name, names.san_dns_names
@@ -245,7 +265,7 @@ where
     }
 }
 
-fn verify_signature(
+pub(crate) fn verify_signature(
     message: &[u8],
     certificate: &ServerCertificate,
     verify: &CertificateVerifyRef,
