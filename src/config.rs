@@ -144,7 +144,11 @@ impl TlsClock for NoClock {
 /// signed and writes the TLS encoding of the signature (the same encoding the
 /// built-in variants produce: DER `SEQUENCE { r, s }` for ECDSA, the raw 64-byte
 /// `R || S` for Ed25519).
-pub trait SigningKey {
+/// The `Sync` bound keeps [`PrivateKey`] `Send` and `Sync`. `&T` is `Send`
+/// only when `T: Sync`, so without it the `External` variant would make
+/// `PrivateKey` neither, and a key could no longer be moved to the task or
+/// thread running the connection. Every other variant is already both.
+pub trait SigningKey: Sync {
     /// The signature scheme this key signs with.
     fn signature_scheme(&self) -> SignatureScheme;
 
@@ -522,6 +526,16 @@ mod tests {
         fn sign(&self, _message: &[u8], _out: &mut [u8]) -> Result<usize, SigningError> {
             Err(SigningError::Failed { code: 0x1234 })
         }
+    }
+
+    /// Every variant of `PrivateKey` is `Send` and `Sync`, so a key can be
+    /// moved to whichever task or thread drives the connection. `External`
+    /// holds a `&'static dyn SigningKey`, which is only `Send` because
+    /// `SigningKey` requires `Sync` — drop that bound and this stops compiling.
+    #[test]
+    fn private_key_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<PrivateKey>();
     }
 
     #[test]
