@@ -84,21 +84,6 @@ impl<'a> WriteBuffer<'a> {
         self.reborrow_mut().start_record(header)
     }
 
-    pub(crate) fn close_record<CipherSuite>(
-        &mut self,
-        write_key_schedule: &mut WriteKeySchedule<CipherSuite>,
-    ) -> Result<&[u8], TlsError>
-    where
-        CipherSuite: TlsCipherSuite,
-    {
-        close_record(
-            self.buffer,
-            &mut self.pos,
-            &mut self.current_header,
-            write_key_schedule,
-        )
-    }
-
     pub fn write_record<CipherSuite>(
         &mut self,
         record: &ClientRecord<CipherSuite>,
@@ -192,21 +177,6 @@ impl WriteBufferBorrowMut<'_> {
 
     pub(crate) fn start_record(&mut self, header: ClientRecordHeader) -> Result<(), TlsError> {
         start_record(self.buffer, self.pos, self.current_header, header)
-    }
-
-    pub fn close_record<CipherSuite>(
-        &mut self,
-        write_key_schedule: &mut WriteKeySchedule<CipherSuite>,
-    ) -> Result<&[u8], TlsError>
-    where
-        CipherSuite: TlsCipherSuite,
-    {
-        close_record(
-            self.buffer,
-            self.pos,
-            self.current_header,
-            write_key_schedule,
-        )
     }
 
     pub(crate) fn seal_record<CipherSuite>(

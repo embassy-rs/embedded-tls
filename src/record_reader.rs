@@ -81,6 +81,8 @@ impl<'a> RecordReader<'a> {
             self.buf,
             &mut self.decoded,
             &mut self.pending,
+            &mut self.header_buf,
+            &mut self.header_read,
             transport,
             key_schedule,
         )
@@ -114,6 +116,8 @@ impl RecordReaderBorrowMut<'_> {
             self.buf,
             self.decoded,
             self.pending,
+            self.header_buf,
+            self.header_read,
             transport,
             key_schedule,
         )
@@ -164,36 +168,34 @@ pub fn read_blocking<'m, CipherSuite: TlsCipherSuite>(
     buf: &'m mut [u8],
     decoded: &mut usize,
     pending: &mut usize,
+    header_buf: &mut [u8; RecordHeader::LEN],
+    header_read: &mut usize,
     transport: &mut impl BlockingRead,
     key_schedule: &mut ReadKeySchedule<CipherSuite>,
 ) -> Result<ServerRecord<'m, CipherSuite>, TlsError> {
-    let header: RecordHeader = next_record_header_blocking(transport)?;
+    // A `read` that fails part way through the header keeps what it has, so the next `read`
+    // completes it. The async `read` does the same for a cancelled future.
+    while *header_read < RecordHeader::LEN {
+        let read = transport
+            .read(&mut header_buf[*header_read..])
+            .map_err(|e| TlsError::Io(e.kind()))?;
+        if read == 0 {
+            return Err(TlsError::IoError);
+        }
+        *header_read += read;
+    }
+    let header = RecordHeader::decode(*header_buf)?;
 
     advance_blocking(buf, decoded, pending, transport, header.content_length())?;
-    consume(
+    let result = consume(
         buf,
         decoded,
         pending,
         header,
         key_schedule.transcript_hash(),
-    )
-}
-
-fn next_record_header_blocking(
-    transport: &mut impl BlockingRead,
-) -> Result<RecordHeader, TlsError> {
-    let mut buf: [u8; RecordHeader::LEN] = [0; RecordHeader::LEN];
-    let mut total_read: usize = 0;
-    while total_read != RecordHeader::LEN {
-        let read: usize = transport
-            .read(&mut buf[total_read..])
-            .map_err(|e| TlsError::Io(e.kind()))?;
-        if read == 0 {
-            return Err(TlsError::IoError);
-        }
-        total_read += read;
-    }
-    RecordHeader::decode(buf)
+    );
+    *header_read = 0;
+    result
 }
 
 async fn advance(

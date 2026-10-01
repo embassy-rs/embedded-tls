@@ -128,24 +128,23 @@ where
     /// to be written to the connection.
     ///
     /// Returns the number of bytes buffered/written.
+    ///
+    /// A `write` that returns an error does not consume any bytes.
     pub fn write(&mut self, buf: &[u8]) -> Result<usize, TlsError> {
         if self.is_opened() {
             if !self
                 .record_write_buf
                 .contains(ClientRecordHeader::ApplicationData)
+                || self.record_write_buf.is_full()
             {
                 self.flush()?;
                 self.record_write_buf
                     .start_record(ClientRecordHeader::ApplicationData)?;
             }
 
-            let buffered = self.record_write_buf.append(buf);
-
-            if self.record_write_buf.is_full() {
-                self.flush()?;
-            }
-
-            Ok(buffered)
+            // Nothing can fail after the append, so a write that returns an error does not consume
+            // any of these bytes.
+            Ok(self.record_write_buf.append(buf))
         } else {
             Err(TlsError::MissingHandshake)
         }
@@ -153,16 +152,16 @@ where
 
     /// Force all previously written, buffered bytes to be encoded into a tls record and written
     /// to the connection.
+    ///
+    /// A `flush` that returns an error part way through a record is completed by the next `write`
+    /// or `flush`.
     pub fn flush(&mut self) -> Result<(), TlsError> {
         if !self.record_write_buf.is_empty() {
-            let key_schedule = self.key_schedule.write_state();
-            let slice = self.record_write_buf.close_record(key_schedule)?;
-
-            self.delegate
-                .write_all(slice)
-                .map_err(|e| TlsError::Io(e.kind()))?;
-
-            key_schedule.increment_counter();
+            send_record(
+                &mut self.record_write_buf.reborrow_mut(),
+                self.key_schedule.write_state(),
+                &mut self.delegate,
+            )?;
 
             if self.flush_policy.flush_transport() {
                 self.flush_transport()?;
@@ -483,19 +482,16 @@ where
             if !self
                 .record_write_buf
                 .contains(ClientRecordHeader::ApplicationData)
+                || self.record_write_buf.is_full()
             {
                 self.flush()?;
                 self.record_write_buf
                     .start_record(ClientRecordHeader::ApplicationData)?;
             }
 
-            let buffered = self.record_write_buf.append(buf);
-
-            if self.record_write_buf.is_full() {
-                self.flush()?;
-            }
-
-            Ok(buffered)
+            // Nothing can fail after the append, so a write that returns an error does not consume
+            // any of these bytes.
+            Ok(self.record_write_buf.append(buf))
         } else {
             Err(TlsError::MissingHandshake)
         }
@@ -503,13 +499,11 @@ where
 
     fn flush(&mut self) -> Result<(), Self::Error> {
         if !self.record_write_buf.is_empty() {
-            let slice = self.record_write_buf.close_record(self.key_schedule)?;
-
-            self.delegate
-                .write_all(slice)
-                .map_err(|e| TlsError::Io(e.kind()))?;
-
-            self.key_schedule.increment_counter();
+            send_record(
+                &mut self.record_write_buf,
+                self.key_schedule,
+                &mut self.delegate,
+            )?;
 
             if self.flush_policy.flush_transport() {
                 self.flush_transport()?;
@@ -518,4 +512,33 @@ where
 
         Ok(())
     }
+}
+
+/// Seals the open record, if there is one, and writes the sealed record to `delegate`.
+///
+/// The record counter advances as the record is sealed, before the first write, so a write
+/// that times out never leads to two records under one nonce. An error part way through leaves
+/// the unsent bytes in the buffer, and the next call writes them before anything else.
+fn send_record<CipherSuite>(
+    record_write_buf: &mut WriteBufferBorrowMut<'_>,
+    key_schedule: &mut WriteKeySchedule<CipherSuite>,
+    delegate: &mut impl Write,
+) -> Result<(), TlsError>
+where
+    CipherSuite: TlsCipherSuite,
+{
+    if record_write_buf.is_open() {
+        record_write_buf.seal_record(key_schedule)?;
+        key_schedule.increment_counter();
+    }
+    while !record_write_buf.unsent().is_empty() {
+        let written = delegate
+            .write(record_write_buf.unsent())
+            .map_err(|e| TlsError::Io(e.kind()))?;
+        if written == 0 {
+            return Err(TlsError::Io(embedded_io::ErrorKind::WriteZero));
+        }
+        record_write_buf.mark_sent(written);
+    }
+    Ok(())
 }
