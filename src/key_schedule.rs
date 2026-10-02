@@ -437,4 +437,21 @@ where
         );
         Ok(hmac.verify(finished.verify.as_ref()))
     }
+
+    /// The `Finished` that a server holding the handshake secret sends for the current
+    /// transcript. A peer that chose its own key share can always make one.
+    #[cfg(test)]
+    pub(crate) fn server_finished(&self) -> Result<Finished<CipherSuite::Hash>, TlsError> {
+        let key = self
+            .state
+            .traffic_secret
+            .expand_label_hash(b"finished", ContextType::None)?;
+        let hash = self.transcript_hash.clone().finalize();
+        let mut hmac = <CipherSuite::Hash as TlsHash>::Hmac::new(key.as_ref());
+        hmac.update(hash.as_ref());
+        Ok(Finished {
+            verify: hmac.finalize(),
+            hash: Some(hash),
+        })
+    }
 }
