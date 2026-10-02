@@ -143,6 +143,9 @@ where
     certificate_request: Option<CertificateRequest>,
     #[cfg(feature = "mlkem")]
     kem: Option<DecapsulationKey<MlKem768>>,
+    /// The number of pre-shared key identities the `ClientHello` offered.
+    psk_identities: usize,
+    server_auth: ServerAuth,
 }
 
 impl<CipherSuite> Handshake<CipherSuite>
@@ -156,8 +159,25 @@ where
             certificate_request: None,
             #[cfg(feature = "mlkem")]
             kem: None,
+            psk_identities: 0,
+            server_auth: ServerAuth::None,
         }
     }
+}
+
+/// How far the server has proven its identity. A valid `Finished` only proves that the peer
+/// knows the handshake secret. A peer that chose its own key share always knows it
+/// (RFC 8446, Section 4.4).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ServerAuth {
+    /// The server has proven nothing yet.
+    None,
+    /// The verifier accepted the `Certificate`, and its `CertificateVerify` has not arrived.
+    Certificate,
+    /// The verifier accepted the `CertificateVerify` signature.
+    Signed,
+    /// The server selected the pre-shared key the client offered.
+    Psk,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -402,6 +422,7 @@ where
     CipherSuite: TlsCipherSuite,
 {
     key_schedule.initialize_early_secret(config.psk.as_ref().map(|p| p.0))?;
+    handshake.psk_identities = config.psk.as_ref().map_or(0, |p| p.1.len());
     let (write_key_schedule, read_key_schedule) = key_schedule.as_split();
     let client_hello = ClientRecord::client_hello(config)?;
     let slice = tx_buf.write_record(&client_hello, write_key_schedule, Some(read_key_schedule))?;
@@ -438,6 +459,15 @@ where
                         &kem,
                     )
                     .ok_or(TlsError::InvalidKeyShare)?;
+                if let Some(selected) = server_hello.selected_psk_identity() {
+                    // (RFC 8446, Section 4.2.11)
+                    //
+                    // The selected identity must be one the client offered.
+                    if usize::from(selected) >= handshake.psk_identities {
+                        return Err(TlsError::InvalidHandshake);
+                    }
+                    handshake.server_auth = ServerAuth::Psk;
+                }
                 key_schedule.initialize_handshake_secret(&shared)?;
                 Ok(State::ServerVerify)
             }
@@ -467,18 +497,30 @@ where
                 match server_handshake {
                     ServerHandshake::EncryptedExtensions(_) => {}
                     ServerHandshake::Certificate(certificate) => {
+                        if handshake.server_auth != ServerAuth::None {
+                            return Err(TlsError::InvalidHandshake);
+                        }
                         let transcript = key_schedule.transcript_hash();
                         verifier.verify_certificate(transcript, certificate)?;
+                        handshake.server_auth = ServerAuth::Certificate;
                         debug!("Certificate verified!");
                     }
                     ServerHandshake::CertificateVerify(verify) => {
+                        if handshake.server_auth != ServerAuth::Certificate {
+                            return Err(TlsError::InvalidHandshake);
+                        }
                         verifier.verify_signature(verify)?;
+                        handshake.server_auth = ServerAuth::Signed;
                         debug!("Signature verified!");
                     }
                     ServerHandshake::CertificateRequest(request) => {
                         handshake.certificate_request.replace(request.try_into()?);
                     }
                     ServerHandshake::Finished(finished) => {
+                        if !matches!(handshake.server_auth, ServerAuth::Signed | ServerAuth::Psk) {
+                            warn!("Finished before the server authenticated");
+                            return Err(TlsError::InvalidHandshake);
+                        }
                         if !key_schedule.verify_server_finished(&finished)? {
                             warn!("Server signature verification failed");
                             return Err(TlsError::InvalidSignature);
@@ -630,4 +672,237 @@ where
     key_schedule.initialize_master_secret()?;
 
     Ok(State::ApplicationData)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SignatureScheme;
+    use crate::config::{Aes128GcmSha256, CertificateVerifyRef, NoVerify};
+    #[cfg(not(any(feature = "x25519", feature = "mlkem")))]
+    use crate::handshake::server_hello::ServerHello;
+
+    type Suite = Aes128GcmSha256;
+
+    /// The client's state after a `ServerHello` from a peer that chose its own key share, so the
+    /// peer knows the handshake secret.
+    fn after_server_hello() -> (Handshake<Suite>, KeySchedule<Suite>) {
+        let mut key_schedule = KeySchedule::new();
+        key_schedule.initialize_early_secret(None).unwrap();
+        key_schedule.initialize_handshake_secret(&[7; 32]).unwrap();
+        (Handshake::new(), key_schedule)
+    }
+
+    fn finished(key_schedule: &mut KeySchedule<Suite>) -> ServerRecord<'static, Suite> {
+        let finished = key_schedule.read_state().server_finished().unwrap();
+        assert!(
+            key_schedule
+                .read_state()
+                .verify_server_finished(&finished)
+                .unwrap()
+        );
+        ServerRecord::Handshake(ServerHandshake::Finished(finished))
+    }
+
+    fn certificate() -> ServerRecord<'static, Suite> {
+        ServerRecord::Handshake(ServerHandshake::Certificate(CertificateRef::with_context(
+            &[],
+        )))
+    }
+
+    /// A `CertificateVerify` with a made-up signature. `NoVerify` accepts any signature, so the
+    /// tests that use it check only the order of the messages.
+    fn certificate_verify() -> ServerRecord<'static, Suite> {
+        ServerRecord::Handshake(ServerHandshake::CertificateVerify(CertificateVerifyRef {
+            signature_scheme: SignatureScheme::EcdsaSecp256r1Sha256,
+            signature: &[1; 64],
+        }))
+    }
+
+    #[test]
+    fn finished_without_a_certificate_is_refused() {
+        let (mut handshake, mut key_schedule) = after_server_hello();
+        let record = finished(&mut key_schedule);
+        let result =
+            process_server_verify(&mut handshake, &mut key_schedule, &mut NoVerify, record);
+        assert!(
+            matches!(result, Err(TlsError::InvalidHandshake)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn certificate_then_certificate_verify_then_finished_is_accepted() {
+        let (mut handshake, mut key_schedule) = after_server_hello();
+        for record in [certificate(), certificate_verify()] {
+            let result =
+                process_server_verify(&mut handshake, &mut key_schedule, &mut NoVerify, record);
+            assert!(matches!(result, Ok(State::ServerVerify)), "{result:?}");
+        }
+        let record = finished(&mut key_schedule);
+        let result =
+            process_server_verify(&mut handshake, &mut key_schedule, &mut NoVerify, record);
+        assert!(matches!(result, Ok(State::ClientFinished)), "{result:?}");
+    }
+
+    #[test]
+    fn a_certificate_after_a_selected_psk_is_refused() {
+        let (mut handshake, mut key_schedule) = after_server_hello();
+        handshake.server_auth = ServerAuth::Psk;
+        let result = process_server_verify(
+            &mut handshake,
+            &mut key_schedule,
+            &mut NoVerify,
+            certificate(),
+        );
+        assert!(
+            matches!(result, Err(TlsError::InvalidHandshake)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn finished_after_a_verified_signature_is_accepted() {
+        let (mut handshake, mut key_schedule) = after_server_hello();
+        handshake.server_auth = ServerAuth::Signed;
+        let record = finished(&mut key_schedule);
+        let result =
+            process_server_verify(&mut handshake, &mut key_schedule, &mut NoVerify, record);
+        assert!(matches!(result, Ok(State::ClientFinished)), "{result:?}");
+    }
+
+    #[test]
+    fn finished_after_a_selected_psk_is_accepted() {
+        let (mut handshake, mut key_schedule) = after_server_hello();
+        handshake.server_auth = ServerAuth::Psk;
+        let record = finished(&mut key_schedule);
+        let result =
+            process_server_verify(&mut handshake, &mut key_schedule, &mut NoVerify, record);
+        assert!(matches!(result, Ok(State::ClientFinished)), "{result:?}");
+    }
+
+    #[test]
+    fn finished_after_a_certificate_without_its_signature_is_refused() {
+        let (mut handshake, mut key_schedule) = after_server_hello();
+        handshake.server_auth = ServerAuth::Certificate;
+        let record = finished(&mut key_schedule);
+        let result =
+            process_server_verify(&mut handshake, &mut key_schedule, &mut NoVerify, record);
+        assert!(
+            matches!(result, Err(TlsError::InvalidHandshake)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn certificate_verify_after_a_certificate_authenticates_the_server() {
+        let (mut handshake, mut key_schedule) = after_server_hello();
+        handshake.server_auth = ServerAuth::Certificate;
+        let result = process_server_verify(
+            &mut handshake,
+            &mut key_schedule,
+            &mut NoVerify,
+            certificate_verify(),
+        );
+        assert!(matches!(result, Ok(State::ServerVerify)), "{result:?}");
+        assert_eq!(handshake.server_auth, ServerAuth::Signed);
+    }
+
+    /// A `ServerHello` with a P-256 key share from a fresh key, and with a `pre_shared_key`
+    /// extension that selects the identity `psk` when it is set.
+    #[cfg(not(any(feature = "x25519", feature = "mlkem")))]
+    fn server_hello(psk: Option<u16>) -> std::vec::Vec<u8> {
+        let key = SecretKey::generate()
+            .unwrap()
+            .public_key()
+            .unwrap()
+            .to_sec1();
+        let mut extensions = std::vec::Vec::new();
+        extensions.extend_from_slice(&[0x00, 0x33]);
+        extensions.extend_from_slice(&(4 + key.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(&[0x00, 0x17]);
+        extensions.extend_from_slice(&(key.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(&key);
+        if let Some(identity) = psk {
+            extensions.extend_from_slice(&[0x00, 0x29, 0x00, 0x02]);
+            extensions.extend_from_slice(&identity.to_be_bytes());
+        }
+        let mut hello = std::vec![0x03, 0x03];
+        hello.extend_from_slice(&[0; 32]);
+        hello.extend_from_slice(&[0x00, 0x13, 0x01, 0x00]);
+        hello.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        hello.extend_from_slice(&extensions);
+        hello
+    }
+
+    #[cfg(not(any(feature = "x25519", feature = "mlkem")))]
+    fn process_hello(handshake: &mut Handshake<Suite>, bytes: &[u8]) -> Result<State, TlsError> {
+        handshake.secret = Some(SecretKey::generate().unwrap());
+        let hello = ServerHello::parse(&mut ParseBuffer::new(bytes)).unwrap();
+        let mut key_schedule = KeySchedule::new();
+        key_schedule.initialize_early_secret(None).unwrap();
+        process_server_hello(
+            handshake,
+            &mut key_schedule,
+            ServerRecord::Handshake(ServerHandshake::ServerHello(hello)),
+        )
+    }
+
+    #[test]
+    #[cfg(not(any(feature = "x25519", feature = "mlkem")))]
+    fn a_selected_psk_that_was_not_offered_is_refused() {
+        let mut handshake = Handshake::new();
+        let result = process_hello(&mut handshake, &server_hello(Some(0)));
+        assert!(
+            matches!(result, Err(TlsError::InvalidHandshake)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(not(any(feature = "x25519", feature = "mlkem")))]
+    fn a_selected_psk_identity_past_the_offered_ones_is_refused() {
+        let mut handshake = Handshake::new();
+        handshake.psk_identities = 1;
+        let result = process_hello(&mut handshake, &server_hello(Some(1)));
+        assert!(
+            matches!(result, Err(TlsError::InvalidHandshake)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(not(any(feature = "x25519", feature = "mlkem")))]
+    fn a_selected_psk_that_was_offered_authenticates_the_server() {
+        let mut handshake = Handshake::new();
+        handshake.psk_identities = 2;
+        let result = process_hello(&mut handshake, &server_hello(Some(1)));
+        assert!(matches!(result, Ok(State::ServerVerify)), "{result:?}");
+        assert_eq!(handshake.server_auth, ServerAuth::Psk);
+    }
+
+    #[test]
+    #[cfg(not(any(feature = "x25519", feature = "mlkem")))]
+    fn a_hello_without_a_psk_leaves_the_server_unauthenticated() {
+        let mut handshake = Handshake::new();
+        handshake.psk_identities = 1;
+        let result = process_hello(&mut handshake, &server_hello(None));
+        assert!(matches!(result, Ok(State::ServerVerify)), "{result:?}");
+        assert_eq!(handshake.server_auth, ServerAuth::None);
+    }
+
+    #[test]
+    fn certificate_verify_without_a_certificate_is_refused() {
+        let (mut handshake, mut key_schedule) = after_server_hello();
+        let result = process_server_verify(
+            &mut handshake,
+            &mut key_schedule,
+            &mut NoVerify,
+            certificate_verify(),
+        );
+        assert!(
+            matches!(result, Err(TlsError::InvalidHandshake)),
+            "{result:?}"
+        );
+    }
 }
