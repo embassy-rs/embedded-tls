@@ -167,10 +167,13 @@ where
                 &mut self.delegate,
             )
             .await?;
+        }
 
-            if self.flush_policy.flush_transport() {
-                self.flush_transport().await?;
-            }
+        // A `flush` cancelled during the transport flush left the transport unflushed. Flush it,
+        // whether or not this call sent a record.
+        if self.flush_policy.flush_transport() && self.record_write_buf.transport_unflushed() {
+            self.flush_transport().await?;
+            self.record_write_buf.transport_flushed();
         }
 
         Ok(())
@@ -520,10 +523,13 @@ where
                 &mut self.delegate,
             )
             .await?;
+        }
 
-            if self.flush_policy.flush_transport() {
-                self.flush_transport().await?;
-            }
+        // A `flush` cancelled during the transport flush left the transport unflushed. Flush it,
+        // whether or not this call sent a record.
+        if self.flush_policy.flush_transport() && self.record_write_buf.transport_unflushed() {
+            self.flush_transport().await?;
+            self.record_write_buf.transport_flushed();
         }
 
         Ok(())

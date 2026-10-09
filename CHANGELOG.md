@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `write` or `flush` that is cancelled or fails part way through a TLS record is completed by the next `write` or `flush`.
 - A blocking `read` that fails part way through a record is completed by the next `read`.
 - A record that a `write` fills is sent by the next `write` or `flush`. A caller that flushes after its writes is unaffected.
+- A `flush` that is cancelled or fails during the transport flush is completed by the next `flush` or `write`, as `FlushPolicy::Strict` requires.
 - Fix a record-stream desync when an async record read is cancelled and resumed (e.g. under a read/write `select`): persist the partial record header on the reader, and read only the still-missing body bytes in `advance` instead of a fixed `amount`.
 - All crypto (except RSA) and RNG is now done through `embassy-crypto`. You must add dependencies providing implementations yourself. See the [`embassy-crypto` README](https://docs.embassy.dev/embassy-crypto) for details.
 - Removed the `CryptoProvider` trait and `UnsecureProvider`. `TlsContext::new` now takes the config and the certificate verifier. The client certificate and key are set with `TlsContext::with_client_cert`. The cipher suite is selected by the `TlsConnection` generic param.

@@ -106,6 +106,39 @@ impl<T: Write> Write for Shared<T> {
     }
 }
 
+/// A transport whose flush stays pending while `stalled` is set, as an embassy TCP socket's
+/// flush does until the peer acknowledges the data. `flushes` counts the flushes that complete.
+struct SlowFlush<T> {
+    inner: T,
+    stalled: Rc<Cell<bool>>,
+    flushes: Rc<Cell<usize>>,
+}
+
+impl<T: ErrorType> ErrorType for SlowFlush<T> {
+    type Error = T::Error;
+}
+
+impl<T: Read> Read for SlowFlush<T> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        self.inner.read(buf).await
+    }
+}
+
+impl<T: Write> Write for SlowFlush<T> {
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        self.inner.write(buf).await
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        if self.stalled.get() {
+            return std::future::pending().await;
+        }
+        self.inner.flush().await?;
+        self.flushes.set(self.flushes.get() + 1);
+        Ok(())
+    }
+}
+
 /// The bytes a TLS 1.3 record adds to its data with AES-128-GCM: the 5-byte header, the 1-byte
 /// inner content type and the 16-byte tag. The flush sweep fails if this is wrong.
 const RECORD_OVERHEAD: usize = 22;
@@ -371,4 +404,195 @@ async fn split_writer_flush_dropped_mid_record_resumes_on_the_next_flush() {
         read_exactly(&mut reader, b"first second").await,
         b"first second"
     );
+}
+
+#[tokio::test]
+async fn flush_dropped_while_flushing_the_transport_flushes_it_on_the_next_flush() {
+    use embedded_tls::*;
+    let stream = tokio::net::TcpStream::connect(setup())
+        .await
+        .expect("error connecting to server");
+    let stalled = Rc::new(Cell::new(false));
+    let flushes = Rc::new(Cell::new(0));
+    let mut read_record_buffer = [0; 16384];
+    let mut write_record_buffer = [0; 16384];
+    let config = TlsConfig::new().with_server_name("localhost");
+    let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
+        SlowFlush {
+            inner: FromTokio::new(stream),
+            stalled: stalled.clone(),
+            flushes: flushes.clone(),
+        },
+        &mut read_record_buffer,
+        &mut write_record_buffer,
+    );
+    tls.set_flush_policy(flush_policy::FlushPolicy::Strict);
+    tls.open(TlsContext::new(&config, NoVerify))
+        .await
+        .expect("error establishing TLS connection");
+
+    tls.write_all(b"first").await.expect("error writing data");
+    let before = flushes.get();
+    stalled.set(true);
+    assert!(!poll_once_then_drop(tls.flush()));
+    stalled.set(false);
+    tls.flush().await.expect("error flushing data");
+
+    assert_eq!(flushes.get(), before + 1);
+    assert_eq!(read_exactly(&mut tls, b"first").await, b"first");
+}
+
+#[tokio::test]
+async fn split_writer_flush_dropped_while_flushing_the_transport_flushes_it_on_the_next_flush() {
+    use embedded_tls::*;
+    let stream = tokio::net::TcpStream::connect(setup())
+        .await
+        .expect("error connecting to server");
+    let stalled = Rc::new(Cell::new(false));
+    let flushes = Rc::new(Cell::new(0));
+    let mut read_record_buffer = [0; 16384];
+    let mut write_record_buffer = [0; 16384];
+    let config = TlsConfig::new().with_server_name("localhost");
+    let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
+        Shared(Rc::new(RefCell::new(SlowFlush {
+            inner: FromTokio::new(stream),
+            stalled: stalled.clone(),
+            flushes: flushes.clone(),
+        }))),
+        &mut read_record_buffer,
+        &mut write_record_buffer,
+    );
+    tls.set_flush_policy(flush_policy::FlushPolicy::Strict);
+    tls.open(TlsContext::new(&config, NoVerify))
+        .await
+        .expect("error establishing TLS connection");
+    let (mut reader, mut writer) = tls.split();
+
+    writer
+        .write_all(b"first")
+        .await
+        .expect("error writing data");
+    let before = flushes.get();
+    stalled.set(true);
+    assert!(!poll_once_then_drop(writer.flush()));
+    stalled.set(false);
+    writer.flush().await.expect("error flushing data");
+
+    assert_eq!(flushes.get(), before + 1);
+    assert_eq!(read_exactly(&mut reader, b"first").await, b"first");
+}
+
+#[tokio::test]
+async fn write_dropped_while_flushing_the_transport_flushes_it_on_the_next_write() {
+    use embedded_tls::*;
+    let stream = tokio::net::TcpStream::connect(setup())
+        .await
+        .expect("error connecting to server");
+    let stalled = Rc::new(Cell::new(false));
+    let flushes = Rc::new(Cell::new(0));
+    let mut read_record_buffer = [0; 16384];
+    // A small write buffer, so one write fills the record.
+    let mut write_record_buffer = [0; 1024];
+    let config = TlsConfig::new().with_server_name("localhost");
+    let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
+        SlowFlush {
+            inner: FromTokio::new(stream),
+            stalled: stalled.clone(),
+            flushes: flushes.clone(),
+        },
+        &mut read_record_buffer,
+        &mut write_record_buffer,
+    );
+    tls.set_flush_policy(flush_policy::FlushPolicy::Strict);
+    tls.open(TlsContext::new(&config, NoVerify))
+        .await
+        .expect("error establishing TLS connection");
+
+    let data: Vec<u8> = (0..1500u32).map(|i| b'a' + (i % 26) as u8).collect();
+    let first = tls.write(&data).await.expect("error writing data");
+    assert!(first < data.len(), "the first write should fill the record");
+    let before = flushes.get();
+    // The next write sends the full record, then waits on the transport's flush.
+    stalled.set(true);
+    assert!(!poll_once_then_drop(tls.write(&data[first..])));
+    stalled.set(false);
+    let second = tls.write(&data[first..]).await.expect("error writing data");
+
+    assert_eq!(flushes.get(), before + 1);
+    tls.write_all(&data[first + second..])
+        .await
+        .expect("error writing data");
+    tls.flush().await.expect("error flushing data");
+    assert_eq!(read_exactly(&mut tls, &data).await, data);
+}
+
+#[tokio::test]
+async fn a_flush_with_nothing_sent_since_the_last_transport_flush_does_not_flush_it_again() {
+    use embedded_tls::*;
+    let stream = tokio::net::TcpStream::connect(setup())
+        .await
+        .expect("error connecting to server");
+    let flushes = Rc::new(Cell::new(0));
+    let mut read_record_buffer = [0; 16384];
+    let mut write_record_buffer = [0; 16384];
+    let config = TlsConfig::new().with_server_name("localhost");
+    let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
+        SlowFlush {
+            inner: FromTokio::new(stream),
+            stalled: Rc::new(Cell::new(false)),
+            flushes: flushes.clone(),
+        },
+        &mut read_record_buffer,
+        &mut write_record_buffer,
+    );
+    tls.set_flush_policy(flush_policy::FlushPolicy::Strict);
+    tls.open(TlsContext::new(&config, NoVerify))
+        .await
+        .expect("error establishing TLS connection");
+
+    tls.write_all(b"first").await.expect("error writing data");
+    let before = flushes.get();
+    tls.flush().await.expect("error flushing data");
+    tls.flush().await.expect("error flushing data");
+
+    assert_eq!(flushes.get(), before + 1);
+    assert_eq!(read_exactly(&mut tls, b"first").await, b"first");
+}
+
+#[tokio::test]
+async fn a_split_writer_flush_with_nothing_sent_since_the_last_transport_flush_does_not_flush_it_again()
+ {
+    use embedded_tls::*;
+    let stream = tokio::net::TcpStream::connect(setup())
+        .await
+        .expect("error connecting to server");
+    let flushes = Rc::new(Cell::new(0));
+    let mut read_record_buffer = [0; 16384];
+    let mut write_record_buffer = [0; 16384];
+    let config = TlsConfig::new().with_server_name("localhost");
+    let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
+        Shared(Rc::new(RefCell::new(SlowFlush {
+            inner: FromTokio::new(stream),
+            stalled: Rc::new(Cell::new(false)),
+            flushes: flushes.clone(),
+        }))),
+        &mut read_record_buffer,
+        &mut write_record_buffer,
+    );
+    tls.set_flush_policy(flush_policy::FlushPolicy::Strict);
+    tls.open(TlsContext::new(&config, NoVerify))
+        .await
+        .expect("error establishing TLS connection");
+    let (mut reader, mut writer) = tls.split();
+
+    writer
+        .write_all(b"first")
+        .await
+        .expect("error writing data");
+    let before = flushes.get();
+    writer.flush().await.expect("error flushing data");
+    writer.flush().await.expect("error flushing data");
+
+    assert_eq!(flushes.get(), before + 1);
+    assert_eq!(read_exactly(&mut reader, b"first").await, b"first");
 }

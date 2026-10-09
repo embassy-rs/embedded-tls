@@ -162,10 +162,13 @@ where
                 self.key_schedule.write_state(),
                 &mut self.delegate,
             )?;
+        }
 
-            if self.flush_policy.flush_transport() {
-                self.flush_transport()?;
-            }
+        // A `flush` that failed during the transport flush left the transport unflushed. Flush it,
+        // whether or not this call sent a record.
+        if self.flush_policy.flush_transport() && self.record_write_buf.transport_unflushed() {
+            self.flush_transport()?;
+            self.record_write_buf.transport_flushed();
         }
 
         Ok(())
@@ -504,10 +507,13 @@ where
                 self.key_schedule,
                 &mut self.delegate,
             )?;
+        }
 
-            if self.flush_policy.flush_transport() {
-                self.flush_transport()?;
-            }
+        // A `flush` that failed during the transport flush left the transport unflushed. Flush it,
+        // whether or not this call sent a record.
+        if self.flush_policy.flush_transport() && self.record_write_buf.transport_unflushed() {
+            self.flush_transport()?;
+            self.record_write_buf.transport_flushed();
         }
 
         Ok(())

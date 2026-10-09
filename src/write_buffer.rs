@@ -16,6 +16,11 @@ pub struct WriteBuffer<'a> {
     /// The bytes of a sealed record that the transport has already consumed.
     sent: usize,
     current_header: Option<ClientRecordHeader>,
+    /// Set when the transport consumes record bytes, cleared when a transport flush completes.
+    /// Under `FlushPolicy::Relaxed` nothing clears it, so the first `flush` after a switch to
+    /// `Strict` flushes the transport. The handshake and `close` do not set it. They flush the
+    /// transport themselves.
+    transport_unflushed: bool,
 }
 
 pub(crate) struct WriteBufferBorrow<'a> {
@@ -30,6 +35,7 @@ pub(crate) struct WriteBufferBorrowMut<'a> {
     pos: &'a mut usize,
     sent: &'a mut usize,
     current_header: &'a mut Option<ClientRecordHeader>,
+    transport_unflushed: &'a mut bool,
 }
 
 impl<'a> WriteBuffer<'a> {
@@ -43,6 +49,7 @@ impl<'a> WriteBuffer<'a> {
             pos: 0,
             sent: 0,
             current_header: None,
+            transport_unflushed: false,
         }
     }
 
@@ -52,7 +59,17 @@ impl<'a> WriteBuffer<'a> {
             pos: &mut self.pos,
             sent: &mut self.sent,
             current_header: &mut self.current_header,
+            transport_unflushed: &mut self.transport_unflushed,
         }
+    }
+
+    pub(crate) fn transport_unflushed(&self) -> bool {
+        self.transport_unflushed
+    }
+
+    /// A transport flush completed.
+    pub(crate) fn transport_flushed(&mut self) {
+        self.transport_unflushed = false;
     }
 
     pub(crate) fn reborrow(&self) -> WriteBufferBorrow<'_> {
@@ -205,11 +222,21 @@ impl WriteBufferBorrowMut<'_> {
     /// Records that the transport consumed `count` bytes of the sealed record. The buffer is
     /// empty again once it has consumed all of them.
     pub(crate) fn mark_sent(&mut self, count: usize) {
+        *self.transport_unflushed = true;
         *self.sent += count;
         if *self.sent >= *self.pos {
             *self.pos = 0;
             *self.sent = 0;
         }
+    }
+
+    pub(crate) fn transport_unflushed(&self) -> bool {
+        *self.transport_unflushed
+    }
+
+    /// A transport flush completed.
+    pub(crate) fn transport_flushed(&mut self) {
+        *self.transport_unflushed = false;
     }
 }
 

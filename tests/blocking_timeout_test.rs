@@ -113,6 +113,40 @@ impl<T: Write> Write for Shared<T> {
     }
 }
 
+/// A transport whose flush times out while `time_out` is set, as a socket with a timeout
+/// does when the peer is slow to acknowledge the data. `flushes` counts the flushes that
+/// complete.
+struct SlowFlush<T> {
+    inner: T,
+    time_out: Rc<Cell<bool>>,
+    flushes: Rc<Cell<usize>>,
+}
+
+impl<T: ErrorType<Error = std::io::Error>> ErrorType for SlowFlush<T> {
+    type Error = std::io::Error;
+}
+
+impl<T: Read + ErrorType<Error = std::io::Error>> Read for SlowFlush<T> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        self.inner.read(buf)
+    }
+}
+
+impl<T: Write + ErrorType<Error = std::io::Error>> Write for SlowFlush<T> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        if self.time_out.get() {
+            return Err(timed_out());
+        }
+        self.inner.flush()?;
+        self.flushes.set(self.flushes.get() + 1);
+        Ok(())
+    }
+}
+
 /// The bytes a TLS 1.3 record adds to its data with AES-128-GCM: the 5-byte header, the 1-byte
 /// inner content type and the 16-byte tag. The flush sweep fails if this is wrong.
 const RECORD_OVERHEAD: usize = 22;
@@ -386,4 +420,177 @@ fn split_writer_flush_timed_out_mid_record_resumes_on_the_next_flush() {
     writer.flush().expect("error flushing data");
 
     assert_eq!(read_exactly(&mut reader, b"first second"), b"first second");
+}
+
+#[test]
+fn flush_timed_out_while_flushing_the_transport_flushes_it_on_the_next_flush() {
+    use embedded_tls::blocking::*;
+    let (transport, _) = transport();
+    let time_out = Rc::new(Cell::new(false));
+    let flushes = Rc::new(Cell::new(0));
+    let mut read_record_buffer = [0; 16384];
+    let mut write_record_buffer = [0; 16384];
+    let config = TlsConfig::new().with_server_name("localhost");
+    let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
+        SlowFlush {
+            inner: transport,
+            time_out: time_out.clone(),
+            flushes: flushes.clone(),
+        },
+        &mut read_record_buffer,
+        &mut write_record_buffer,
+    );
+    tls.set_flush_policy(embedded_tls::flush_policy::FlushPolicy::Strict);
+    tls.open(TlsContext::new(&config, NoVerify))
+        .expect("error establishing TLS connection");
+
+    tls.write_all(b"first").expect("error writing data");
+    let before = flushes.get();
+    time_out.set(true);
+    let error = tls.flush().expect_err("the flush should time out");
+    assert!(is_timeout(&error), "{error:?}");
+    time_out.set(false);
+    tls.flush().expect("error flushing data");
+
+    assert_eq!(flushes.get(), before + 1);
+    assert_eq!(read_exactly(&mut tls, b"first"), b"first");
+}
+
+#[test]
+fn split_writer_flush_timed_out_while_flushing_the_transport_flushes_it_on_the_next_flush() {
+    use embedded_tls::blocking::*;
+    let (transport, _) = transport();
+    let time_out = Rc::new(Cell::new(false));
+    let flushes = Rc::new(Cell::new(0));
+    let mut read_record_buffer = [0; 16384];
+    let mut write_record_buffer = [0; 16384];
+    let config = TlsConfig::new().with_server_name("localhost");
+    let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
+        Shared(Rc::new(RefCell::new(SlowFlush {
+            inner: transport,
+            time_out: time_out.clone(),
+            flushes: flushes.clone(),
+        }))),
+        &mut read_record_buffer,
+        &mut write_record_buffer,
+    );
+    tls.set_flush_policy(embedded_tls::flush_policy::FlushPolicy::Strict);
+    tls.open(TlsContext::new(&config, NoVerify))
+        .expect("error establishing TLS connection");
+    let (mut reader, mut writer) = tls.split();
+
+    writer.write_all(b"first").expect("error writing data");
+    let before = flushes.get();
+    time_out.set(true);
+    let error = writer.flush().expect_err("the flush should time out");
+    assert!(is_timeout(&error), "{error:?}");
+    time_out.set(false);
+    writer.flush().expect("error flushing data");
+
+    assert_eq!(flushes.get(), before + 1);
+    assert_eq!(read_exactly(&mut reader, b"first"), b"first");
+}
+
+#[test]
+fn write_timed_out_while_flushing_the_transport_flushes_it_on_the_next_write() {
+    use embedded_tls::blocking::*;
+    let (transport, _) = transport();
+    let time_out = Rc::new(Cell::new(false));
+    let flushes = Rc::new(Cell::new(0));
+    let mut read_record_buffer = [0; 16384];
+    // A small write buffer, so one write fills the record.
+    let mut write_record_buffer = [0; 1024];
+    let config = TlsConfig::new().with_server_name("localhost");
+    let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
+        SlowFlush {
+            inner: transport,
+            time_out: time_out.clone(),
+            flushes: flushes.clone(),
+        },
+        &mut read_record_buffer,
+        &mut write_record_buffer,
+    );
+    tls.set_flush_policy(embedded_tls::flush_policy::FlushPolicy::Strict);
+    tls.open(TlsContext::new(&config, NoVerify))
+        .expect("error establishing TLS connection");
+
+    let data: Vec<u8> = (0..1500u32).map(|i| b'a' + (i % 26) as u8).collect();
+    let first = tls.write(&data).expect("error writing data");
+    assert!(first < data.len(), "the first write should fill the record");
+    let before = flushes.get();
+    // The next write sends the full record, then times out on the transport's flush.
+    time_out.set(true);
+    let error = tls
+        .write(&data[first..])
+        .expect_err("the write should time out");
+    assert!(is_timeout(&error), "{error:?}");
+    time_out.set(false);
+    let second = tls.write(&data[first..]).expect("error writing data");
+
+    assert_eq!(flushes.get(), before + 1);
+    tls.write_all(&data[first + second..])
+        .expect("error writing data");
+    tls.flush().expect("error flushing data");
+    assert_eq!(read_exactly(&mut tls, &data), data);
+}
+
+#[test]
+fn a_flush_with_nothing_sent_since_the_last_transport_flush_does_not_flush_it_again() {
+    use embedded_tls::blocking::*;
+    let (transport, _) = transport();
+    let flushes = Rc::new(Cell::new(0));
+    let mut read_record_buffer = [0; 16384];
+    let mut write_record_buffer = [0; 16384];
+    let config = TlsConfig::new().with_server_name("localhost");
+    let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
+        SlowFlush {
+            inner: transport,
+            time_out: Rc::new(Cell::new(false)),
+            flushes: flushes.clone(),
+        },
+        &mut read_record_buffer,
+        &mut write_record_buffer,
+    );
+    tls.set_flush_policy(embedded_tls::flush_policy::FlushPolicy::Strict);
+    tls.open(TlsContext::new(&config, NoVerify))
+        .expect("error establishing TLS connection");
+
+    tls.write_all(b"first").expect("error writing data");
+    let before = flushes.get();
+    tls.flush().expect("error flushing data");
+    tls.flush().expect("error flushing data");
+
+    assert_eq!(flushes.get(), before + 1);
+    assert_eq!(read_exactly(&mut tls, b"first"), b"first");
+}
+
+#[test]
+fn a_split_writer_flush_with_nothing_sent_since_the_last_transport_flush_does_not_flush_it_again() {
+    use embedded_tls::blocking::*;
+    let (transport, _) = transport();
+    let flushes = Rc::new(Cell::new(0));
+    let mut read_record_buffer = [0; 16384];
+    let mut write_record_buffer = [0; 16384];
+    let config = TlsConfig::new().with_server_name("localhost");
+    let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
+        Shared(Rc::new(RefCell::new(SlowFlush {
+            inner: transport,
+            time_out: Rc::new(Cell::new(false)),
+            flushes: flushes.clone(),
+        }))),
+        &mut read_record_buffer,
+        &mut write_record_buffer,
+    );
+    tls.set_flush_policy(embedded_tls::flush_policy::FlushPolicy::Strict);
+    tls.open(TlsContext::new(&config, NoVerify))
+        .expect("error establishing TLS connection");
+    let (mut reader, mut writer) = tls.split();
+
+    writer.write_all(b"first").expect("error writing data");
+    let before = flushes.get();
+    writer.flush().expect("error flushing data");
+    writer.flush().expect("error flushing data");
+
+    assert_eq!(flushes.get(), before + 1);
+    assert_eq!(read_exactly(&mut reader, b"first"), b"first");
 }
