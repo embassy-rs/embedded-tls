@@ -24,6 +24,9 @@ use tokio::net::TcpStream;
 use embassy_crypto_rand as _;
 use embassy_crypto_rustcrypto as _;
 
+# #[cfg(not(feature = "p256"))]
+# fn main() {}
+# #[cfg(feature = "p256")]
 #[tokio::main]
 async fn main() {
     let stream = TcpStream::connect("google.com:443")
@@ -33,7 +36,7 @@ async fn main() {
     println!("TCP connection opened");
     let mut read_record_buffer = [0; 16384];
     let mut write_record_buffer = [0; 16384];
-    let config = TlsConfig::new().with_server_name("google.com").enable_rsa_signatures();
+    let config = TlsConfig::new().with_server_name("google.com");
     let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
         FromTokio::new(stream),
         &mut read_record_buffer,
@@ -42,7 +45,7 @@ async fn main() {
 
     // `NoVerify` skips server certificate verification, which is fine when using PSK or
     // when just testing. Otherwise, pass a verifier such as `embedded_tls::webpki::CertVerifier`
-    // (std only) or `embedded_tls::pki::CertVerifier`.
+    // or `embedded_tls::pki::CertVerifier`.
     tls.open(TlsContext::new(&config, NoVerify))
         .await
         .expect("error establishing TLS connection");
@@ -100,6 +103,7 @@ pub enum TlsError {
     ConnectionClosed,
     Unimplemented,
     MissingHandshake,
+    MissingPsk,
     HandshakeAborted(alert::AlertLevel, alert::AlertDescription),
     AbortHandshake(alert::AlertLevel, alert::AlertDescription),
     IoError,

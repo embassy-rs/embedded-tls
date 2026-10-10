@@ -350,6 +350,12 @@ impl<'a, Verifier> TlsContext<'a, Verifier> {
 }
 
 impl<'a> TlsConfig<'a> {
+    /// A configuration whose `signature_algorithms` offer the schemes of the enabled `p256`,
+    /// `p384`, `ed25519` and `rsa` features, the ones the verifiers can check.
+    ///
+    /// Without any of those features the client offers no scheme, so it can only authenticate
+    /// the server with a pre-shared key, set with [`TlsConfig::with_psk`]. Opening a connection
+    /// without one fails with [`TlsError::MissingPsk`](crate::TlsError::MissingPsk).
     pub fn new() -> Self {
         let mut config = Self {
             signature_schemes: Vec::new(),
@@ -360,22 +366,26 @@ impl<'a> TlsConfig<'a> {
             alpn_protocols: None,
         };
 
-        if cfg!(feature = "alloc") {
+        #[cfg(feature = "rsa")]
+        {
             config = config.enable_rsa_signatures();
         }
 
+        #[cfg(feature = "p256")]
         unwrap!(
             config
                 .signature_schemes
                 .push(SignatureScheme::EcdsaSecp256r1Sha256)
                 .ok()
         );
+        #[cfg(feature = "p384")]
         unwrap!(
             config
                 .signature_schemes
                 .push(SignatureScheme::EcdsaSecp384r1Sha384)
                 .ok()
         );
+        #[cfg(feature = "ed25519")]
         unwrap!(config.signature_schemes.push(SignatureScheme::Ed25519).ok());
 
         #[cfg(not(feature = "x25519"))]
@@ -391,6 +401,7 @@ impl<'a> TlsConfig<'a> {
     }
 
     /// Enable RSA ciphers even if they might not be supported.
+    #[cfg(feature = "rsa")]
     pub fn enable_rsa_signatures(mut self) -> Self {
         unwrap!(
             self.signature_schemes
@@ -469,6 +480,10 @@ impl<'a> TlsConfig<'a> {
         self
     }
 
+    /// Offer the pre-shared key `psk` under `identities`.
+    ///
+    /// A build without a signature feature needs one, because the server cannot authenticate
+    /// itself with a certificate.
     pub fn with_psk(mut self, psk: &'a [u8], identities: &[&'a [u8]]) -> Self {
         // TODO: Remove potential panic
         self.psk = Some((psk, unwrap!(Vec::from_slice(identities).ok())));
@@ -577,5 +592,29 @@ mod tests {
         let key = PrivateKey::External(&TooBig);
         let mut out = Vec::<u8, 128>::new();
         assert!(key.sign(b"hello", &mut out).is_err());
+    }
+
+    fn advertises(scheme: SignatureScheme) -> bool {
+        TlsConfig::new().signature_schemes.contains(&scheme)
+    }
+
+    #[test]
+    fn the_advertised_schemes_are_those_of_the_enabled_signature_features() {
+        assert_eq!(
+            advertises(SignatureScheme::EcdsaSecp256r1Sha256),
+            cfg!(feature = "p256")
+        );
+        assert_eq!(
+            advertises(SignatureScheme::EcdsaSecp384r1Sha384),
+            cfg!(feature = "p384")
+        );
+        assert_eq!(
+            advertises(SignatureScheme::Ed25519),
+            cfg!(feature = "ed25519")
+        );
+        assert_eq!(
+            advertises(SignatureScheme::RsaPssRsaeSha256),
+            cfg!(feature = "rsa")
+        );
     }
 }

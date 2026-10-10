@@ -45,6 +45,12 @@ where
     CipherSuite: TlsCipherSuite,
 {
     pub fn new(config: &'config TlsConfig<'config>) -> Result<Self, TlsError> {
+        // RFC 9846, section 9.2: a ClientHello without a pre-shared key must offer signature
+        // schemes, and a server that receives one without either aborts the handshake.
+        if config.signature_schemes.is_empty() && config.psk.is_none() {
+            return Err(TlsError::MissingPsk);
+        }
+
         let mut random = [0; 32];
         rng_fill_bytes(&mut random);
 
@@ -96,10 +102,14 @@ where
             })
             .encode(buf)?;
 
-            ClientHelloExtension::SignatureAlgorithms(SignatureAlgorithms {
-                supported_signature_algorithms: self.config.signature_schemes.clone(),
-            })
-            .encode(buf)?;
+            // RFC 9846, section 4.3.3: only a client that wants a certificate sends this, and an
+            // empty list is malformed. A build without signature features is PSK-only.
+            if !self.config.signature_schemes.is_empty() {
+                ClientHelloExtension::SignatureAlgorithms(SignatureAlgorithms {
+                    supported_signature_algorithms: self.config.signature_schemes.clone(),
+                })
+                .encode(buf)?;
+            }
 
             if let Some(max_fragment_length) = self.config.max_fragment_length {
                 ClientHelloExtension::MaxFragmentLength(max_fragment_length).encode(buf)?;
@@ -249,5 +259,59 @@ where
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Aes128GcmSha256;
+    use crate::extensions::ExtensionType;
+    use crate::extensions::extension_data::signature_algorithms::SignatureScheme;
+
+    /// The extension types in the `ClientHello` that `config` produces, in order.
+    fn extension_types(config: &TlsConfig) -> std::vec::Vec<u16> {
+        let hello = ClientHello::<Aes128GcmSha256>::new(config).unwrap();
+        let mut bytes = [0; 4096];
+        let mut buf = CryptoBuffer::wrap(&mut bytes);
+        hello.encode(&mut buf).unwrap();
+        // The version, random, empty session ID, one cipher suite, one compression method and
+        // the extensions' length come first.
+        let mut extensions = &buf.as_slice()[2 + 32 + 1 + 4 + 2 + 2..];
+        let mut types = std::vec::Vec::new();
+        while let [high, low, len_high, len_low, rest @ ..] = extensions {
+            types.push(u16::from_be_bytes([*high, *low]));
+            extensions = &rest[usize::from(u16::from_be_bytes([*len_high, *len_low]))..];
+        }
+        types
+    }
+
+    #[test]
+    fn signature_algorithms_is_left_out_when_no_scheme_is_enabled() {
+        let mut config = TlsConfig::new().with_psk(&[0; 32], &[b"client"]);
+        config.signature_schemes.clear();
+        assert!(!extension_types(&config).contains(&(ExtensionType::SignatureAlgorithms as u16)));
+    }
+
+    // RFC 9846, section 9.2: a ClientHello without a pre-shared key must offer signature schemes.
+    #[test]
+    fn client_hello_without_a_scheme_or_a_pre_shared_key_is_refused() {
+        let mut config = TlsConfig::new();
+        config.signature_schemes.clear();
+        assert!(matches!(
+            ClientHello::<Aes128GcmSha256>::new(&config),
+            Err(TlsError::MissingPsk)
+        ));
+    }
+
+    #[test]
+    fn signature_algorithms_is_sent_when_a_scheme_is_enabled() {
+        let mut config = TlsConfig::new();
+        config.signature_schemes.clear();
+        config
+            .signature_schemes
+            .push(SignatureScheme::Ed25519)
+            .unwrap();
+        assert!(extension_types(&config).contains(&(ExtensionType::SignatureAlgorithms as u16)));
     }
 }

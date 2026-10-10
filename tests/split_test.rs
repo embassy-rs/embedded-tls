@@ -1,3 +1,6 @@
+// The test server's certificate is P-256, which the client offers only with `p256`.
+#![cfg(feature = "p256")]
+
 use embedded_io::{Read, Write};
 use embedded_io_adapters::std::FromStd;
 use std::net::{SocketAddr, TcpStream};

@@ -10,7 +10,7 @@ name = "eth"
 path = "src/main.rs"
 
 [dependencies]
-embedded-tls = { path = "../..", default-features = false, features = ["defmt"] }
+embedded-tls = { path = "../..", default-features = false, features = ["defmt", "p256"] }
 
 embassy-stm32 = { version = "0.6.0", features = ["defmt", "stm32h563zi", "memory-x", "time-driver-any", "exti", "embassy-crypto-rng"] }
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "defmt"] }
@@ -23,6 +23,7 @@ embassy-crypto-rustcrypto = { version = "0.1.0", features = [
     "embassy-crypto-aes128-gcm",
     "embassy-crypto-p256-arith",
     "embassy-crypto-p256-ecdh",
+    "embassy-crypto-p256-ecdsa",
 ] }
 
 defmt = "1.0"

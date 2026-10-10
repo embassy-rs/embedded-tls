@@ -269,7 +269,10 @@ struct EcPrivateKey<'a> {
 
 /// Left-pad an unsigned integer into a fixed-size, big-endian array.
 #[cfg(any(
-    all(feature = "rustpki", any(feature = "p256", feature = "p384")),
+    all(
+        any(feature = "rustpki", feature = "webpki"),
+        any(feature = "p256", feature = "p384")
+    ),
     test
 ))]
 fn uint_to_array<const N: usize>(value: UintRef<'_>) -> Result<[u8; N], TlsError> {
@@ -284,7 +287,10 @@ fn uint_to_array<const N: usize>(value: UintRef<'_>) -> Result<[u8; N], TlsError
 
 /// Parse a DER `ECDSA-Sig-Value` into its `(r, s)` components.
 #[cfg(any(
-    all(feature = "rustpki", any(feature = "p256", feature = "p384")),
+    all(
+        any(feature = "rustpki", feature = "webpki"),
+        any(feature = "p256", feature = "p384")
+    ),
     test
 ))]
 pub(crate) fn ecdsa_signature_from_der<const N: usize>(
@@ -331,7 +337,7 @@ pub(crate) fn sec1_private_key(der: &[u8]) -> Result<&[u8], TlsError> {
 /// Verify a DER-encoded ECDSA/P-256 signature over `message`, hashed with SHA-256.
 ///
 /// `public_key` is the uncompressed SEC1 encoding of the public key.
-#[cfg(all(feature = "rustpki", feature = "p256"))]
+#[cfg(all(any(feature = "rustpki", feature = "webpki"), feature = "p256"))]
 pub(crate) fn verify_ecdsa_p256(
     public_key: &[u8],
     message: &[u8],
@@ -352,7 +358,7 @@ pub(crate) fn verify_ecdsa_p256(
 /// Verify a DER-encoded ECDSA/P-384 signature over `message`, hashed with SHA-384.
 ///
 /// `public_key` is the uncompressed SEC1 encoding of the public key.
-#[cfg(all(feature = "rustpki", feature = "p384"))]
+#[cfg(all(any(feature = "rustpki", feature = "webpki"), feature = "p384"))]
 pub(crate) fn verify_ecdsa_p384(
     public_key: &[u8],
     message: &[u8],
@@ -405,7 +411,7 @@ pub(crate) fn sign_ecdsa_p384<const N: usize>(
 /// Verify an Ed25519 signature over `message`.
 ///
 /// `public_key` is the 32-byte compressed point and `signature` the 64-byte `R || S`.
-#[cfg(all(feature = "ed25519", feature = "rustpki"))]
+#[cfg(all(feature = "ed25519", any(feature = "rustpki", feature = "webpki")))]
 pub(crate) fn verify_ed25519(
     public_key: &[u8],
     message: &[u8],
