@@ -44,8 +44,7 @@ async fn main() {
     );
 
     // `NoVerify` skips server certificate verification, which is fine when using PSK or
-    // when just testing. Otherwise, pass a verifier such as `embedded_tls::webpki::CertVerifier`
-    // or `embedded_tls::pki::CertVerifier`.
+    // when just testing. Otherwise, pass a verifier, as "Verifying the server" above shows.
     tls.open(TlsContext::new(&config, NoVerify))
         .await
         .expect("error establishing TLS connection");

@@ -36,7 +36,7 @@ mod algorithms;
 /// The verifier keeps a copy of the server's own certificate until it checks the
 /// `CertificateVerify` signature, so `CERT_SIZE` must hold that certificate. The intermediates
 /// are not copied. A larger certificate fails with [`TlsError::OutOfMemory`] after the chain
-/// has been verified.
+/// has been verified. The README shows how to measure the server's certificate.
 pub struct CertVerifier<'a, CipherSuite, Clock, const CERT_SIZE: usize>
 where
     Clock: TlsClock,

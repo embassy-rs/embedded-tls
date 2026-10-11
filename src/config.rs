@@ -124,6 +124,10 @@ pub struct TlsConfig<'a> {
     pub(crate) max_fragment_length: Option<MaxFragmentLength>,
 }
 
+/// The time for certificate dates, given as a verifier's `Clock` parameter.
+///
+/// Implement it for a type that reads the device's clock. `std::time::SystemTime` implements it
+/// with the `std` feature, and [`InsecureIgnoreDates`] is for a device without the time.
 pub trait TlsClock {
     /// Returns the time in seconds since the Unix epoch.
     ///

@@ -47,6 +47,12 @@ pub struct CertificateNames {
     pub san_dns_names: heapless::Vec<heapless::String<HOSTNAME_MAXLEN>, MAX_SAN_DNS_NAMES>,
 }
 
+/// Verifies that the trusted root signed the server's certificate directly, with code written
+/// for this crate on `RustCrypto`. It checks no chain, and ignores the other certificates the
+/// server sends.
+///
+/// The verifier keeps a copy of the whole Certificate message until it checks the
+/// `CertificateVerify` signature, so `CERT_SIZE` must hold every certificate the server sends.
 pub struct CertVerifier<'a, CipherSuite, Clock, const CERT_SIZE: usize>
 where
     Clock: TlsClock,
