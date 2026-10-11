@@ -86,7 +86,13 @@ where
         transcript: &CipherSuite::Hash,
         cert: ServerCertificate,
     ) -> Result<(), TlsError> {
-        verify_certificate(self.host.as_deref(), &self.ca, &cert, Clock::now())?;
+        let now = if let Some(now) = Clock::now() {
+            now
+        } else {
+            warn!("No time provided, so the certificate dates are not checked");
+            latest_not_before(&cert)?
+        };
+        verify_certificate(self.host.as_deref(), &self.ca, &cert, now)?;
         self.certificate.replace(cert.try_into()?);
         self.certificate_transcript.replace(transcript.clone());
         Ok(())
@@ -137,6 +143,66 @@ fn refused(error: &webpki::Error, mapped: TlsError) -> TlsError {
     mapped
 }
 
+/// The latest `notBefore` of the certificates in `certificate`, in seconds since the Unix epoch.
+///
+/// A certificate whose dates cannot be read fails the chain.
+fn latest_not_before(certificate: &ServerCertificate) -> Result<u64, TlsError> {
+    let mut latest = None;
+    for entry in &certificate.entries {
+        let CertificateEntryRef::X509(der) = entry else {
+            return Err(TlsError::DecodeError);
+        };
+        let not_before = not_before(der).map_err(|_| TlsError::DecodeError)?;
+        latest = latest.max(Some(not_before));
+    }
+    latest.ok_or(TlsError::DecodeError)
+}
+
+/// The `notBefore` of a DER certificate, in seconds since the Unix epoch.
+///
+/// rustls-webpki keeps a certificate's validity private, so this reads it: the certificate's
+/// `SEQUENCE`, then `tbsCertificate` up to `validity` (RFC 5280, section 4.1).
+fn not_before(certificate: &[u8]) -> der::Result<u64> {
+    use der::asn1::{GeneralizedTime, UtcTime};
+    use der::{Decode, Reader, SliceReader, Tag, TagNumber};
+
+    let skip_rest = |reader: &mut SliceReader<'_>| -> der::Result<()> {
+        while !reader.is_finished() {
+            reader.tlv_bytes()?;
+        }
+        Ok(())
+    };
+    let mut reader = SliceReader::new(certificate)?;
+    let not_before = reader.sequence(|certificate| -> der::Result<Duration> {
+        let not_before = certificate.sequence(|tbs| -> der::Result<Duration> {
+            let version = Tag::ContextSpecific {
+                constructed: true,
+                number: TagNumber(0),
+            };
+            if Tag::peek(tbs)? == version {
+                tbs.tlv_bytes()?;
+            }
+            // serialNumber, signature and issuer
+            for _ in 0..3 {
+                tbs.tlv_bytes()?;
+            }
+            let not_before = tbs.sequence(|validity| -> der::Result<Duration> {
+                let not_before = match Tag::peek(validity)? {
+                    Tag::UtcTime => UtcTime::decode(validity)?.to_unix_duration(),
+                    _ => GeneralizedTime::decode(validity)?.to_unix_duration(),
+                };
+                skip_rest(validity)?;
+                Ok(not_before)
+            })?;
+            skip_rest(tbs)?;
+            Ok(not_before)
+        })?;
+        skip_rest(certificate)?;
+        Ok(not_before)
+    })?;
+    Ok(not_before.as_secs())
+}
+
 /// The server's own certificate, which must be the first entry and X.509.
 fn end_entity<'a>(certificate: &ServerCertificate<'a>) -> Result<CertificateDer<'a>, TlsError> {
     match certificate.entries.first() {
@@ -165,7 +231,7 @@ fn verify_certificate(
     host: Option<&str>,
     ca: &Certificate<&[u8]>,
     certificate: &ServerCertificate,
-    now: Option<u64>,
+    now: u64,
 ) -> Result<(), TlsError> {
     let Certificate::X509(ca) = ca else {
         return Err(TlsError::DecodeError);
@@ -184,11 +250,6 @@ fn verify_certificate(
             .push(CertificateDer::from(*der))
             .map_err(|_| TlsError::InsufficientSpace)?;
     }
-
-    let Some(now) = now else {
-        warn!("No time provided, so the certificate's validity cannot be checked");
-        return Err(TlsError::InvalidCertificate);
-    };
 
     let cert =
         webpki::EndEntityCert::try_from(&leaf).map_err(|e| refused(&e, TlsError::DecodeError))?;
@@ -214,7 +275,7 @@ fn verify_certificate(
 #[cfg(all(test, feature = "std"))]
 mod cert_verifier_tests {
     use super::*;
-    use crate::config::Aes128GcmSha256;
+    use crate::config::{Aes128GcmSha256, InsecureIgnoreDates};
     use openssl::hash::MessageDigest;
     use openssl::pkey::{PKey, Private};
     #[cfg(feature = "rsa")]
@@ -651,5 +712,143 @@ mod cert_verifier_tests {
             &sign(&key, MessageDigest::sha256()),
         );
         assert!(result.is_err(), "{result:?}");
+    }
+
+    /// Runs `chain` through a verifier with `Clock`, for localhost, with `ca` as the anchor.
+    fn verify_with_clock<Clock: TlsClock>(ca: &[u8], chain: &[&[u8]]) -> Result<(), TlsError> {
+        let message = message(chain);
+        let mut verifier = CertVerifier::<Aes128GcmSha256, Clock, 4096>::new(Certificate::X509(ca));
+        verifier.set_hostname_verification("localhost")?;
+        verifier.verify_certificate(&embassy_crypto::Sha256::new(), parse(&message))
+    }
+
+    /// A clock of the application's own that does not have the time yet.
+    struct UnsyncedClock;
+
+    impl TlsClock for UnsyncedClock {
+        fn now() -> Option<u64> {
+            None
+        }
+    }
+
+    #[test]
+    fn expired_server_cert_is_rejected() {
+        let chain = [&der!("expired-server-cert")[..]];
+        assert_matches!(
+            verify(&der!("ca-cert"), &chain, "localhost"),
+            Err(TlsError::InvalidCertificate)
+        );
+    }
+
+    #[test]
+    fn expired_server_cert_is_accepted_by_any_clock_without_the_time() {
+        let chain = [&der!("expired-server-cert")[..]];
+        assert_matches!(
+            verify_with_clock::<UnsyncedClock>(&der!("ca-cert"), &chain),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn expired_server_cert_is_accepted_when_dates_are_ignored() {
+        let chain = [&der!("expired-server-cert")[..]];
+        assert_matches!(
+            verify_with_clock::<InsecureIgnoreDates>(&der!("ca-cert"), &chain),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn not_yet_valid_server_cert_is_accepted_when_dates_are_ignored() {
+        let chain = [&der!("future-server-cert")[..]];
+        assert_matches!(
+            verify_with_clock::<InsecureIgnoreDates>(&der!("ca-cert"), &chain),
+            Ok(())
+        );
+    }
+
+    // im-cert.pem's notBefore is later than im-server-cert.pem's, so only the latest notBefore
+    // of the chain falls within both certificates.
+    #[test]
+    fn intermediate_issued_after_the_server_cert_is_accepted_when_dates_are_ignored() {
+        let chain = [&der!("im-server-cert")[..], &der!("im-cert")];
+        assert_matches!(
+            verify_with_clock::<InsecureIgnoreDates>(&der!("ca-cert"), &chain),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn chain_whose_validity_periods_do_not_overlap_is_rejected_when_dates_are_ignored() {
+        let chain = [&der!("late-im-server-cert")[..], &der!("expired-im-cert")];
+        assert_matches!(
+            verify_with_clock::<InsecureIgnoreDates>(&der!("ca-cert"), &chain),
+            Err(TlsError::InvalidCertificate)
+        );
+    }
+
+    #[test]
+    fn ignoring_dates_keeps_the_name_check() {
+        let ca = der!("ca-cert");
+        let mut verifier =
+            CertVerifier::<Aes128GcmSha256, InsecureIgnoreDates, 4096>::new(Certificate::X509(&ca));
+        verifier.set_hostname_verification("example.com").unwrap();
+        let message = message(&[&der!("expired-server-cert")]);
+        assert_matches!(
+            verifier.verify_certificate(&embassy_crypto::Sha256::new(), parse(&message)),
+            Err(TlsError::InvalidCertificate)
+        );
+    }
+
+    #[test]
+    fn server_cert_whose_dates_cannot_be_read_is_rejected_when_dates_are_ignored() {
+        // The validity is two 13-byte UTCTimes. Changing the first one's tag makes it unreadable.
+        let mut server_cert = der!("expired-server-cert");
+        let validity = server_cert
+            .windows(4)
+            .position(|bytes| bytes == [0x30, 0x1e, 0x17, 0x0d])
+            .unwrap();
+        server_cert[validity + 2] = 0x04;
+        assert_matches!(
+            verify_with_clock::<InsecureIgnoreDates>(&der!("ca-cert"), &[&server_cert]),
+            Err(TlsError::DecodeError)
+        );
+    }
+
+    #[test]
+    fn not_before_reads_utc_time_and_generalized_time() {
+        // 2020-01-01 and 2090-01-01, at midnight UTC
+        assert_eq!(
+            not_before(&der!("expired-server-cert")).ok(),
+            Some(1_577_836_800)
+        );
+        assert_eq!(
+            not_before(&der!("future-server-cert")).ok(),
+            Some(3_786_912_000)
+        );
+    }
+
+    #[test]
+    fn not_before_reads_a_certificate_with_and_without_the_version() {
+        let tlv = |tag: u8, content: &[u8]| {
+            let mut tlv = std::vec![tag, u8::try_from(content.len()).unwrap()];
+            tlv.extend_from_slice(content);
+            tlv
+        };
+        let validity = [tlv(0x17, b"200101000000Z"), tlv(0x17, b"210101000000Z")].concat();
+        // serialNumber, signature, issuer, validity and subject
+        let v1 = [
+            tlv(0x02, &[1]),
+            tlv(0x30, &[]),
+            tlv(0x30, &[]),
+            tlv(0x30, &validity),
+            tlv(0x30, &[]),
+        ]
+        .concat();
+        let v3 = [tlv(0xa0, &tlv(0x02, &[2])), v1.clone()].concat();
+        for tbs in [v1, v3] {
+            let certificate = tlv(0x30, &tlv(0x30, &tbs));
+            assert_eq!(not_before(&certificate).ok(), Some(1_577_836_800));
+        }
     }
 }

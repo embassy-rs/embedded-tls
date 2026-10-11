@@ -125,12 +125,24 @@ pub struct TlsConfig<'a> {
 }
 
 pub trait TlsClock {
+    /// Returns the time in seconds since the Unix epoch.
+    ///
+    /// Returns `None` on a device without the time. The verifiers then do not check certificate
+    /// dates. A clock that returns `None` until it syncs accepts certificates whatever their dates
+    /// until then. A device that must check dates waits for the time before it connects.
     fn now() -> Option<u64>;
 }
 
-pub struct NoClock;
+#[deprecated(note = "renamed to InsecureIgnoreDates")]
+pub type NoClock = InsecureIgnoreDates;
 
-impl TlsClock for NoClock {
+/// A clock for a device without the time. Certificates pass whatever their dates.
+///
+/// The `webpki` verifier uses the latest `notBefore` in the chain as the time. A chain whose
+/// validity periods do not overlap still fails. Every other check still runs.
+pub struct InsecureIgnoreDates;
+
+impl TlsClock for InsecureIgnoreDates {
     fn now() -> Option<u64> {
         None
     }

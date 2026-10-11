@@ -56,6 +56,15 @@ openssl x509 -req -in p384-key-server.csr -CA p384-ca-cert.pem -CAkey p384-ca-ke
 # Create a certificate for server-key.pem that the P-256 CA signs with SHA-384
 openssl x509 -req -in server.csr -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial -out sha384-server-cert.pem -days 10000 -sha384 -extfile <(printf 'subjectAltName = DNS:localhost\n')
 
+# Create certificates for server-key.pem with fixed dates: one that has expired, and one not yet valid
+openssl x509 -req -in server.csr -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial -out expired-server-cert.pem -not_before 20200101000000Z -not_after 20210101000000Z -sha256 -extfile <(printf 'subjectAltName = DNS:localhost\n')
+openssl x509 -req -in server.csr -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial -out future-server-cert.pem -not_before 20900101000000Z -not_after 20910101000000Z -sha256 -extfile <(printf 'subjectAltName = DNS:localhost\n')
+
+# Create an intermediate that expired in 2021, and a server certificate from it that is valid only
+# from 2022, so no time falls within both
+openssl x509 -req -in im.csr -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial -out expired-im-cert.pem -not_before 20200101000000Z -not_after 20210101000000Z -sha256 -extfile <(printf 'basicConstraints = critical, CA:TRUE\n')
+openssl x509 -req -in im-server.csr -CA expired-im-cert.pem -CAkey im-key.pem -CAcreateserial -out late-im-server-cert.pem -not_before 20220101000000Z -not_after 20230101000000Z -sha256 -copy_extensions copy
+
 # Create RSA CA private key and certificate
 openssl req -x509 -newkey rsa:2048 -keyout rsa-ca-key.pem -nodes -out rsa-ca-cert.pem -sha256 -days 10000
 
