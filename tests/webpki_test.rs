@@ -81,8 +81,7 @@ async fn test_server_certificate_validation() {
     let mut read_record_buffer = [0; 16384];
     let mut write_record_buffer = [0; 16384];
 
-    // Hostname verification is not enabled
-    let config = TlsConfig::new();
+    let config = TlsConfig::new().with_server_name("localhost");
 
     let mut tls = TlsConnection::<_, Aes128GcmSha256>::new(
         FromTokio::new(stream),

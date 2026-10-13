@@ -104,6 +104,7 @@ pub enum TlsError {
     Unimplemented,
     MissingHandshake,
     MissingPsk,
+    MissingServerName,
     HandshakeAborted(alert::AlertLevel, alert::AlertDescription),
     AbortHandshake(alert::AlertLevel, alert::AlertDescription),
     IoError,

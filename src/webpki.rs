@@ -86,13 +86,17 @@ where
         transcript: &CipherSuite::Hash,
         cert: ServerCertificate,
     ) -> Result<(), TlsError> {
+        let Some(host) = self.host.as_deref() else {
+            warn!("No server name is set, so the certificate is refused");
+            return Err(TlsError::MissingServerName);
+        };
         let now = if let Some(now) = Clock::now() {
             now
         } else {
             warn!("No time provided, so the certificate dates are not checked");
             latest_not_before(&cert)?
         };
-        verify_certificate(self.host.as_deref(), &self.ca, &cert, now)?;
+        verify_certificate(host, &self.ca, &cert, now)?;
         // Copied in place, so no second copy of `CERT_SIZE` bytes sits on the stack.
         let certificate = self.certificate.insert(heapless::Vec::new());
         certificate
@@ -231,7 +235,7 @@ fn verify_signature(
 }
 
 fn verify_certificate(
-    host: Option<&str>,
+    host: &str,
     ca: &Certificate<&[u8]>,
     certificate: &ServerCertificate,
     now: u64,
@@ -267,12 +271,9 @@ fn verify_certificate(
     )
     .map_err(|e| refused(&e, TlsError::InvalidCertificate))?;
 
-    if let Some(host) = host {
-        let name = ServerName::try_from(host).map_err(|_| TlsError::InvalidCertificate)?;
-        cert.verify_is_valid_for_subject_name(&name)
-            .map_err(|e| refused(&e, TlsError::InvalidCertificate))?;
-    }
-    Ok(())
+    let name = ServerName::try_from(host).map_err(|_| TlsError::InvalidCertificate)?;
+    cert.verify_is_valid_for_subject_name(&name)
+        .map_err(|e| refused(&e, TlsError::InvalidCertificate))
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -410,6 +411,29 @@ mod cert_verifier_tests {
         assert_matches!(
             verify(&der!("ca-cert"), &[&der!("server-cert")], "localhost"),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn a_certificate_is_refused_when_no_server_name_is_set() {
+        let message = message(&[&der!("server-cert")]);
+        let ca = der!("ca-cert");
+        let mut verifier = Verifier::new(Certificate::X509(&ca));
+        assert_matches!(
+            verifier.verify_certificate(&embassy_crypto::Sha256::new(), parse(&message)),
+            Err(TlsError::MissingServerName)
+        );
+    }
+
+    // A bad chain without a server name reports the missing name, the setup fault, first.
+    #[test]
+    fn a_missing_server_name_is_reported_before_a_bad_chain() {
+        let message = message(&[&der!("server-cert")]);
+        let ca = der!("other-root-cert");
+        let mut verifier = Verifier::new(Certificate::X509(&ca));
+        assert_matches!(
+            verifier.verify_certificate(&embassy_crypto::Sha256::new(), parse(&message)),
+            Err(TlsError::MissingServerName)
         );
     }
 
