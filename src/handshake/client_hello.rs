@@ -68,35 +68,6 @@ where
     }
 
     pub(crate) fn encode(&self, buf: &mut CryptoBuffer<'_>) -> Result<(), TlsError> {
-        #[cfg(not(feature = "x25519"))]
-        let public_key = self
-            .secret
-            .public_key()
-            .map_err(|_| TlsError::CryptoError)?
-            .to_sec1();
-        #[cfg(feature = "x25519")]
-        let public_key = self
-            .secret
-            .public_key()
-            .map_err(|_| TlsError::CryptoError)?
-            .to_bytes();
-
-        // concat(pubkey + ek) for SecP256r1MlKem768 (65+1184 = 1249 bytes)
-        #[cfg(all(not(feature = "x25519"), feature = "mlkem"))]
-        let mut hybrid: Vec<u8, 1249> = Vec::new();
-        #[cfg(all(not(feature = "x25519"), feature = "mlkem"))]
-        hybrid.extend_from_slice(&public_key).unwrap();
-        #[cfg(all(not(feature = "x25519"), feature = "mlkem"))]
-        hybrid.extend(self.kem.encapsulation_key().to_bytes());
-
-        // concat(ek + pubkey) for x25519MlKem768 (1184+32 = 1216 bytes)
-        #[cfg(all(feature = "x25519", feature = "mlkem"))]
-        let mut hybrid: Vec<u8, 1216> = Vec::new();
-        #[cfg(all(feature = "x25519", feature = "mlkem"))]
-        hybrid.extend(self.kem.encapsulation_key().to_bytes());
-        #[cfg(all(feature = "x25519", feature = "mlkem"))]
-        hybrid.extend_from_slice(&public_key).unwrap();
-
         buf.push_u16(LEGACY_VERSION)
             .map_err(|_| TlsError::EncodeError)?;
         buf.extend_from_slice(&self.random)
@@ -144,32 +115,7 @@ where
             })
             .encode(buf)?;
 
-            ClientHelloExtension::KeyShare(KeyShareClientHello {
-                client_shares: Vec::from_slice(&[
-                    #[cfg(not(feature = "x25519"))]
-                    KeyShareEntry {
-                        group: NamedGroup::Secp256r1,
-                        opaque: &public_key,
-                    },
-                    #[cfg(all(feature = "mlkem", not(feature = "x25519")))]
-                    KeyShareEntry {
-                        group: NamedGroup::SecP256r1MLKEM768,
-                        opaque: &hybrid,
-                    },
-                    #[cfg(feature = "x25519")]
-                    KeyShareEntry {
-                        group: NamedGroup::X25519,
-                        opaque: &public_key,
-                    },
-                    #[cfg(all(feature = "mlkem", feature = "x25519"))]
-                    KeyShareEntry {
-                        group: NamedGroup::X25519MLKEM768,
-                        opaque: &hybrid,
-                    },
-                ])
-                .unwrap(),
-            })
-            .encode(buf)?;
+            self.encode_key_share(buf)?;
 
             if let Some(server_name) = self.config.server_name {
                 ClientHelloExtension::ServerName(ServerNameList::single(server_name))
@@ -207,6 +153,64 @@ where
         })?;
 
         Ok(())
+    }
+
+    fn encode_key_share(&self, buf: &mut CryptoBuffer<'_>) -> Result<(), TlsError> {
+        #[cfg(not(feature = "x25519"))]
+        let public_key = self
+            .secret
+            .public_key()
+            .map_err(|_| TlsError::CryptoError)?
+            .to_sec1();
+        #[cfg(feature = "x25519")]
+        let public_key = self
+            .secret
+            .public_key()
+            .map_err(|_| TlsError::CryptoError)?
+            .to_bytes();
+
+        // concat(pubkey + ek) for SecP256r1MlKem768 (65+1184 = 1249 bytes)
+        #[cfg(all(not(feature = "x25519"), feature = "mlkem"))]
+        let mut hybrid: Vec<u8, 1249> = Vec::new();
+        #[cfg(all(not(feature = "x25519"), feature = "mlkem"))]
+        hybrid.extend_from_slice(&public_key).unwrap();
+        #[cfg(all(not(feature = "x25519"), feature = "mlkem"))]
+        hybrid.extend(self.kem.encapsulation_key().to_bytes());
+
+        // concat(ek + pubkey) for x25519MlKem768 (1184+32 = 1216 bytes)
+        #[cfg(all(feature = "x25519", feature = "mlkem"))]
+        let mut hybrid: Vec<u8, 1216> = Vec::new();
+        #[cfg(all(feature = "x25519", feature = "mlkem"))]
+        hybrid.extend(self.kem.encapsulation_key().to_bytes());
+        #[cfg(all(feature = "x25519", feature = "mlkem"))]
+        hybrid.extend_from_slice(&public_key).unwrap();
+
+        ClientHelloExtension::KeyShare(KeyShareClientHello {
+            client_shares: Vec::from_slice(&[
+                #[cfg(not(feature = "x25519"))]
+                KeyShareEntry {
+                    group: NamedGroup::Secp256r1,
+                    opaque: &public_key,
+                },
+                #[cfg(all(feature = "mlkem", not(feature = "x25519")))]
+                KeyShareEntry {
+                    group: NamedGroup::SecP256r1MLKEM768,
+                    opaque: &hybrid,
+                },
+                #[cfg(feature = "x25519")]
+                KeyShareEntry {
+                    group: NamedGroup::X25519,
+                    opaque: &public_key,
+                },
+                #[cfg(all(feature = "mlkem", feature = "x25519"))]
+                KeyShareEntry {
+                    group: NamedGroup::X25519MLKEM768,
+                    opaque: &hybrid,
+                },
+            ])
+            .unwrap(),
+        })
+        .encode(buf)
     }
 
     pub fn finalize(
