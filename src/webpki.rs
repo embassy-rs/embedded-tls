@@ -14,8 +14,7 @@ use crate::crypto::{TlsHash, certificate_verify_message};
 use crate::extensions::extension_data::signature_algorithms::SignatureScheme;
 use crate::handshake::{
     certificate::{
-        Certificate as OwnedCertificate, CertificateEntryRef, CertificateRef as ServerCertificate,
-        MAX_CERTIFICATE_ENTRIES,
+        CertificateEntryRef, CertificateRef as ServerCertificate, MAX_CERTIFICATE_ENTRIES,
     },
     certificate_verify::CertificateVerifyRef,
 };
@@ -34,9 +33,10 @@ mod algorithms;
 /// The server's first certificate is its own, and the rest are intermediates in any order.
 /// rustls-webpki builds a path through at most six intermediates.
 ///
-/// The verifier keeps a copy of the server's whole chain until it checks the
-/// `CertificateVerify` signature, so `CERT_SIZE` must hold every certificate the server sends.
-/// A chain that does not fit fails with [`TlsError::OutOfMemory`] after it has been verified.
+/// The verifier keeps a copy of the server's own certificate until it checks the
+/// `CertificateVerify` signature, so `CERT_SIZE` must hold that certificate. The intermediates
+/// are not copied. A larger certificate fails with [`TlsError::OutOfMemory`] after the chain
+/// has been verified.
 pub struct CertVerifier<'a, CipherSuite, Clock, const CERT_SIZE: usize>
 where
     Clock: TlsClock,
@@ -45,7 +45,7 @@ where
     ca: Certificate<&'a [u8]>,
     host: Option<heapless::String<64>>,
     certificate_transcript: Option<CipherSuite::Hash>,
-    certificate: Option<OwnedCertificate<CERT_SIZE>>,
+    certificate: Option<heapless::Vec<u8, CERT_SIZE>>,
     _clock: PhantomData<Clock>,
 }
 
@@ -93,7 +93,11 @@ where
             latest_not_before(&cert)?
         };
         verify_certificate(self.host.as_deref(), &self.ca, &cert, now)?;
-        self.certificate.replace(cert.try_into()?);
+        // Copied in place, so no second copy of `CERT_SIZE` bytes sits on the stack.
+        let certificate = self.certificate.insert(heapless::Vec::new());
+        certificate
+            .extend_from_slice(&end_entity(&cert)?)
+            .map_err(|_| TlsError::OutOfMemory)?;
         self.certificate_transcript.replace(transcript.clone());
         Ok(())
     }
@@ -105,7 +109,7 @@ where
             handshake_hash.finalize().as_ref(),
         )?;
 
-        let certificate = unwrap!(self.certificate.as_ref()).try_into()?;
+        let certificate = CertificateDer::from(&unwrap!(self.certificate.as_ref())[..]);
         verify_signature(&msg[..], &certificate, &verify)
     }
 }
@@ -213,12 +217,11 @@ fn end_entity<'a>(certificate: &ServerCertificate<'a>) -> Result<CertificateDer<
 
 fn verify_signature(
     message: &[u8],
-    certificate: &ServerCertificate,
+    certificate: &CertificateDer<'_>,
     verify: &CertificateVerifyRef,
 ) -> Result<(), TlsError> {
-    let der = end_entity(certificate)?;
-    let cert =
-        webpki::EndEntityCert::try_from(&der).map_err(|e| refused(&e, TlsError::DecodeError))?;
+    let cert = webpki::EndEntityCert::try_from(certificate)
+        .map_err(|e| refused(&e, TlsError::DecodeError))?;
     cert.verify_signature(
         algorithm(verify.signature_scheme)?,
         message,
@@ -414,6 +417,43 @@ mod cert_verifier_tests {
     fn server_cert_and_intermediate_are_accepted() {
         let chain = [&der!("im-server-cert")[..], &der!("im-cert")];
         assert_matches!(verify(&der!("ca-cert"), &chain, "localhost"), Ok(()));
+    }
+
+    /// A verifier whose `CERT_SIZE` holds `im-server-cert.pem`, 442 bytes, but not the chain
+    /// with `im-cert.pem`, 486 bytes.
+    type SmallVerifier<'a> = CertVerifier<'a, Aes128GcmSha256, SystemTime, 512>;
+
+    #[cfg(feature = "p256")]
+    #[test]
+    fn cert_size_needs_to_hold_only_the_server_certificate() {
+        let message = message(&[&der!("im-server-cert"), &der!("im-cert")]);
+        let ca = der!("ca-cert");
+        let mut verifier = SmallVerifier::new(Certificate::X509(&ca));
+        verifier.set_hostname_verification("localhost").unwrap();
+        let result = verifier.verify_certificate(&embassy_crypto::Sha256::new(), parse(&message));
+        assert_matches!(result, Ok(()));
+        let key = key(include_str!("../tests/data/im-server-key.pem"));
+        let signature = sign(&key, MessageDigest::sha256());
+        assert_matches!(
+            verifier.verify_signature(CertificateVerifyRef {
+                signature_scheme: SignatureScheme::EcdsaSecp256r1Sha256,
+                signature: &signature,
+            }),
+            Ok(())
+        );
+    }
+
+    #[cfg(feature = "rsa")]
+    #[test]
+    fn a_server_certificate_larger_than_cert_size_is_refused() {
+        let message = message(&[&der!("rsa-server-cert")]);
+        let ca = der!("rsa-ca-cert");
+        let mut verifier = SmallVerifier::new(Certificate::X509(&ca));
+        verifier.set_hostname_verification("localhost").unwrap();
+        assert_matches!(
+            verifier.verify_certificate(&embassy_crypto::Sha256::new(), parse(&message)),
+            Err(TlsError::OutOfMemory)
+        );
     }
 
     #[test]
