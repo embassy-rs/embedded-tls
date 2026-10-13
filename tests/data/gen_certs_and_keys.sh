@@ -12,6 +12,11 @@ openssl ecparam -name prime256v1 -genkey -noout -out client-key.pem
 openssl req -new -sha256 -key client-key.pem -out client.csr
 openssl x509 -req -in client.csr -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial -out client-cert.pem -days 10000 -sha256
 
+# Create a server certificate signed by the client certificate, which is not a CA
+openssl ecparam -name prime256v1 -genkey -noout -out forged-server-key.pem
+openssl req -new -sha256 -key forged-server-key.pem -subj "/CN=Forged Server" -out forged-server.csr
+openssl x509 -req -in forged-server.csr -CA client-cert.pem -CAkey client-key.pem -CAcreateserial -out forged-server-cert.pem -days 10000 -sha256 -extfile <(printf 'subjectAltName = DNS:localhost\n')
+
 # Create private key, certificate signing request (CSR) and certificate for server
 openssl ecparam -name prime256v1 -genkey -noout -out server-key.pem
 openssl req -new -sha256 -key server-key.pem -out server.csr
