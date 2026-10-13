@@ -437,6 +437,17 @@ mod cert_verifier_tests {
         );
     }
 
+    // im-server-cert.pem names IP 127.0.0.1 in its subjectAltName.
+    #[test]
+    fn an_ip_address_server_name_is_checked_against_the_certificate() {
+        let chain = [&der!("im-server-cert")[..], &der!("im-cert")];
+        assert_matches!(verify(&der!("ca-cert"), &chain, "127.0.0.1"), Ok(()));
+        assert_matches!(
+            verify(&der!("ca-cert"), &chain, "127.0.0.2"),
+            Err(TlsError::InvalidCertificate)
+        );
+    }
+
     #[test]
     fn server_cert_and_intermediate_are_accepted() {
         let chain = [&der!("im-server-cert")[..], &der!("im-cert")];
@@ -538,14 +549,34 @@ mod cert_verifier_tests {
         );
     }
 
+    // `open` sets the name before it sends the ClientHello, so a name the ClientHello's SNI check
+    // could misjudge never reaches the wire.
     #[test]
     fn host_name_that_is_not_a_dns_name_or_ip_address_is_refused_before_the_handshake() {
         let ca = der!("ca-cert");
-        let mut verifier = Verifier::new(Certificate::X509(&ca));
-        assert_matches!(
-            verifier.set_hostname_verification("not a host"),
-            Err(TlsError::InvalidCertificate)
-        );
+        for name in [
+            "not a host",
+            "",
+            ".",
+            "1.2.3",
+            "999.1.1.1",
+            "1.1.1.1.",
+            "01.02.03.04",
+            "example.com:443",
+            "192.0.2.1:443",
+            "[::1]",
+            "fe80::1%eth0",
+            "example..com",
+            "-example.com",
+            "*.example.com",
+            "example.123",
+        ] {
+            let mut verifier = Verifier::new(Certificate::X509(&ca));
+            assert_matches!(
+                verifier.set_hostname_verification(name),
+                Err(TlsError::InvalidCertificate)
+            );
+        }
     }
 
     // TLS 1.3 names no scheme for P-256 with SHA-384, so the client does not advertise it.

@@ -448,6 +448,10 @@ impl<'a> TlsConfig<'a> {
         self
     }
 
+    /// Sets the name the server's certificate must match, a DNS name or an IP address.
+    ///
+    /// It is sent as SNI, unless it is an IP address (RFC 6066, section 3). The verifiers refuse a
+    /// certificate without it.
     pub fn with_server_name(mut self, server_name: &'a str) -> Self {
         self.server_name = Some(server_name);
         self
