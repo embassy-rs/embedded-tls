@@ -80,7 +80,11 @@ async fn test_psk_open() {
             &mut write_record_buffer,
         );
 
-        assert!(tls.open(TlsContext::new(&config, NoVerify)).await.is_ok());
+        assert!(
+            tls.open(TlsContext::new(&config, InsecureNoVerify))
+                .await
+                .is_ok()
+        );
         println!("TLS session opened");
 
         tls.write(b"ping").await.unwrap();

@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `rustpki` verifier returns `TlsError::DecodeError` for a `CertificateVerify` that claims `rsa_pss_rsae_sha256` for a non-RSA key, rather than panicking.
 - `TlsClock::now()` returning `None` means the device does not know the time. Both verifiers then skip the certificate dates, and the `webpki` verifier logs a warning.
 - Renamed `NoClock` to `InsecureIgnoreDates`. `NoClock` remains as a deprecated alias.
+- Renamed `NoVerify` to `InsecureNoVerify`. `NoVerify` remains as a deprecated alias.
 
 ## 0.19.0 - 2026-06-01
 

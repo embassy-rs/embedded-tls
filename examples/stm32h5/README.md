@@ -12,7 +12,7 @@ address, e.g.:
 openssl s_server -accept 12345 -tls1_3 -key key.pem -cert cert.pem
 ```
 
-The example uses `NoVerify`, so any certificate is accepted.
+The example uses `InsecureNoVerify`, so any certificate is accepted.
 
 ## Running
 

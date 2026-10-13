@@ -43,9 +43,9 @@ async fn main() {
         &mut write_record_buffer,
     );
 
-    // `NoVerify` skips server certificate verification, which is fine when using PSK or
+    // `InsecureNoVerify` skips server certificate verification, which is fine when using PSK or
     // when just testing. Otherwise, pass a verifier, as "Verifying the server" above shows.
-    tls.open(TlsContext::new(&config, NoVerify))
+    tls.open(TlsContext::new(&config, InsecureNoVerify))
         .await
         .expect("error establishing TLS connection");
 

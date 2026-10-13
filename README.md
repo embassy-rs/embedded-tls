@@ -22,7 +22,7 @@ Only supports writing/receiving one frame at a time, hence using a frame buffer 
 
 ## Verifying the server
 
-Pass a certificate verifier to `TlsContext::new`. `webpki::CertVerifier`, with the `webpki` feature, checks the server's chain against one trusted root with rustls-webpki. It works without `std`. The `p256`, `p384`, `ed25519` and `rsa` features choose the signatures it can check, and the client offers only those. `pki::CertVerifier`, with the `rustpki` feature, is a verifier written for this crate on `RustCrypto`. It accepts only a server certificate the trusted root signed directly. `NoVerify` skips verification, and is safe only when a pre-shared key authenticates the server.
+Pass a certificate verifier to `TlsContext::new`. `webpki::CertVerifier`, with the `webpki` feature, checks the server's chain against one trusted root with rustls-webpki. It works without `std`. The `p256`, `p384`, `ed25519` and `rsa` features choose the signatures it can check, and the client offers only those. `pki::CertVerifier`, with the `rustpki` feature, is a verifier written for this crate on `RustCrypto`. It accepts only a server certificate the trusted root signed directly. `InsecureNoVerify` skips verification, and is safe only when a pre-shared key authenticates the server.
 
 ```rust,ignore
 use embedded_tls::webpki::CertVerifier;

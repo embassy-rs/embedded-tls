@@ -65,7 +65,7 @@ async fn test_google() {
         &mut write_record_buffer,
     );
 
-    let open_fut = tls.open(TlsContext::new(&config, NoVerify));
+    let open_fut = tls.open(TlsContext::new(&config, InsecureNoVerify));
     log::info!("SIZE of open fut is {}", core::mem::size_of_val(&open_fut));
     open_fut.await.expect("error establishing TLS connection");
     log::info!("Established");
@@ -85,6 +85,8 @@ async fn test_google() {
         .expect("error closing session");
 }
 
+// Passes the deprecated `NoVerify` as a value, which callers written before the rename do.
+#[allow(deprecated)]
 #[tokio::test]
 async fn test_ping() {
     use embedded_tls::*;
@@ -170,7 +172,7 @@ async fn test_ping_nocopy() {
 
     log::info!("SIZE of connection is {}", core::mem::size_of_val(&tls));
 
-    let open_fut = tls.open(TlsContext::new(&config, NoVerify));
+    let open_fut = tls.open(TlsContext::new(&config, InsecureNoVerify));
     log::info!("SIZE of open fut is {}", core::mem::size_of_val(&open_fut));
     open_fut.await.expect("error establishing TLS connection");
     log::info!("Established");
@@ -232,7 +234,7 @@ async fn test_ping_nocopy_bufread() {
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
-    tls.open(TlsContext::new(&config, NoVerify))
+    tls.open(TlsContext::new(&config, InsecureNoVerify))
         .await
         .expect("error establishing TLS connection");
     log::info!("Established");
@@ -272,7 +274,7 @@ fn test_blocking_ping() {
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
-    tls.open(TlsContext::new(&config, NoVerify))
+    tls.open(TlsContext::new(&config, InsecureNoVerify))
         .expect("error establishing TLS connection");
     log::info!("Established");
 
@@ -318,7 +320,7 @@ fn test_blocking_ping_nocopy() {
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
-    tls.open(TlsContext::new(&config, NoVerify))
+    tls.open(TlsContext::new(&config, InsecureNoVerify))
         .expect("error establishing TLS connection");
     log::info!("Established");
 
@@ -358,7 +360,7 @@ fn test_blocking_ping_nocopy_bufread() {
         &mut read_record_buffer,
         &mut write_record_buffer,
     );
-    tls.open(TlsContext::new(&config, NoVerify))
+    tls.open(TlsContext::new(&config, InsecureNoVerify))
         .expect("error establishing TLS connection");
     log::info!("Established");
 

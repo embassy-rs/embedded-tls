@@ -85,13 +85,22 @@ where
 
 /// A verifier that accepts any server certificate without checking it.
 ///
-/// Only use this when the server is authenticated by other means, such as a pre-shared key,
-/// or for testing.
+/// With certificates, the connection is encrypted but the server is not authenticated, so an
+/// attacker in the path can stand in for it. Only use this when the server is authenticated by
+/// other means, such as a pre-shared key, or for testing.
 #[derive(Debug, Default, Clone, Copy)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct NoVerify;
+pub struct InsecureNoVerify;
 
-impl<CipherSuite> TlsVerifier<CipherSuite> for NoVerify
+#[deprecated(note = "renamed to InsecureNoVerify")]
+pub type NoVerify = InsecureNoVerify;
+
+// A type alias does not name the unit value, so callers that pass `NoVerify` need this too.
+#[deprecated(note = "renamed to InsecureNoVerify")]
+#[allow(non_upper_case_globals)]
+pub const NoVerify: InsecureNoVerify = InsecureNoVerify;
+
+impl<CipherSuite> TlsVerifier<CipherSuite> for InsecureNoVerify
 where
     CipherSuite: TlsCipherSuite,
 {
@@ -344,7 +353,7 @@ impl<'a, Verifier> TlsContext<'a, Verifier> {
     /// Create a new context with a given config, using `verifier` to verify the server
     /// certificate and its signature.
     ///
-    /// Pass [`NoVerify`] to skip certificate verification entirely. Only do that when the
+    /// Pass [`InsecureNoVerify`] to skip certificate verification entirely. Only do that when the
     /// server is authenticated by other means, such as a pre-shared key, or for testing.
     #[must_use]
     pub fn new(config: &'a TlsConfig<'a>, verifier: Verifier) -> Self {

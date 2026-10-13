@@ -17,7 +17,7 @@ use embassy_stm32::time::Hertz;
 use embassy_stm32::{Config, bind_interrupts, eth};
 use embassy_time::Timer;
 use embedded_io_async::Write;
-use embedded_tls::{Aes128GcmSha256, NoVerify, TlsConfig, TlsConnection, TlsContext};
+use embedded_tls::{Aes128GcmSha256, InsecureNoVerify, TlsConfig, TlsConnection, TlsContext};
 use panic_probe as _;
 use static_cell::StaticCell;
 
@@ -122,7 +122,7 @@ async fn main(spawner: Spawner) -> ! {
         let mut tls: TlsConnection<_, Aes128GcmSha256> =
             TlsConnection::new(socket, &mut read_record_buffer, &mut write_record_buffer);
 
-        if let Err(e) = tls.open(TlsContext::new(&config, NoVerify)).await {
+        if let Err(e) = tls.open(TlsContext::new(&config, InsecureNoVerify)).await {
             info!("TLS handshake error: {:?}", e);
             Timer::after_secs(3).await;
             continue;

@@ -74,7 +74,7 @@ fn early_data_ignored() {
         &mut write_record_buffer,
     );
 
-    tls.open(TlsContext::new(&config, NoVerify))
+    tls.open(TlsContext::new(&config, InsecureNoVerify))
         .expect("error establishing TLS connection");
 
     tls.write_all(b"ping").expect("Failed to write data");
