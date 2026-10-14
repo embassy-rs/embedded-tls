@@ -223,7 +223,8 @@ fn verify_signature(
                 signature::Verifier,
             };
 
-            let der_pubkey = RsaPublicKey::from_pkcs1_der(public_key).unwrap();
+            let der_pubkey =
+                RsaPublicKey::from_pkcs1_der(public_key).map_err(|_| TlsError::DecodeError)?;
             let verifying_key = VerifyingKey::<Sha256>::from(der_pubkey);
 
             let signature =
@@ -741,6 +742,29 @@ mod cert_verifier_tests {
 
         let result = verify(&other_ca, &[&server_cert, &intermediate]);
         assert!(matches!(result, Err(TlsError::InvalidCertificate)));
+    }
+
+    // The scheme comes from the peer's CertificateVerify and the key from the server's
+    // certificate, so a peer can pair an RSA-PSS scheme with an ECDSA key.
+    #[cfg(feature = "rsa")]
+    #[test]
+    fn certificate_verify_claiming_rsa_pss_for_an_ecdsa_key_is_rejected() {
+        let server_cert = pem_parser::pem_to_der(include_str!("../tests/data/server-cert.pem"));
+        let mut chain = ServerCertificate::with_context(&[]);
+        chain.add(CertificateEntryRef::X509(&server_cert)).unwrap();
+
+        for scheme in [
+            SignatureScheme::RsaPssRsaeSha256,
+            SignatureScheme::RsaPssRsaeSha384,
+            SignatureScheme::RsaPssRsaeSha512,
+        ] {
+            let verify = CertificateVerifyRef {
+                signature_scheme: scheme,
+                signature: &[0; 256],
+            };
+            let result = verify_signature(b"message", &chain, &verify);
+            assert!(matches!(result, Err(TlsError::DecodeError)), "{scheme:?}");
+        }
     }
 }
 
