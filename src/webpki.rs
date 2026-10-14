@@ -280,12 +280,9 @@ fn verify_certificate(
 mod cert_verifier_tests {
     use super::*;
     use crate::config::{Aes128GcmSha256, InsecureIgnoreDates};
+    #[cfg(any(feature = "p256", feature = "p384", feature = "rsa"))]
     use openssl::hash::MessageDigest;
     use openssl::pkey::{PKey, Private};
-    #[cfg(feature = "rsa")]
-    use openssl::rsa::Padding;
-    #[cfg(feature = "rsa")]
-    use openssl::sign::RsaPssSaltlen;
     use openssl::sign::Signer;
     use std::time::SystemTime;
 
@@ -351,25 +348,9 @@ mod cert_verifier_tests {
     }
 
     /// Signs the `CertificateVerify` content with `digest`, and with RSA-PKCS#1 for an RSA key.
+    #[cfg(any(feature = "p256", feature = "p384", feature = "rsa"))]
     fn sign(key: &PKey<Private>, digest: MessageDigest) -> std::vec::Vec<u8> {
         let mut signer = Signer::new(digest, key).unwrap();
-        signer.sign_oneshot_to_vec(&signed_content()).unwrap()
-    }
-
-    #[cfg(feature = "ed25519")]
-    fn sign_ed25519(key: &PKey<Private>) -> std::vec::Vec<u8> {
-        let mut signer = Signer::new_without_digest(key).unwrap();
-        signer.sign_oneshot_to_vec(&signed_content()).unwrap()
-    }
-
-    #[cfg(feature = "rsa")]
-    fn sign_rsa_pss(key: &PKey<Private>, digest: MessageDigest) -> std::vec::Vec<u8> {
-        let mut signer = Signer::new(digest, key).unwrap();
-        signer.set_rsa_padding(Padding::PKCS1_PSS).unwrap();
-        signer
-            .set_rsa_pss_saltlen(RsaPssSaltlen::DIGEST_LENGTH)
-            .unwrap();
-        signer.set_rsa_mgf1_md(digest).unwrap();
         signer.sign_oneshot_to_vec(&signed_content()).unwrap()
     }
 
@@ -390,28 +371,23 @@ mod cert_verifier_tests {
         })
     }
 
-    /// Verifies a `CertificateVerify` from `rsa-server-key.pem`, claiming `scheme`.
-    #[cfg(feature = "rsa")]
-    fn verify_rsa(scheme: SignatureScheme, signature: &[u8]) -> Result<(), TlsError> {
-        verify_handshake(
-            &der!("rsa-ca-cert"),
-            &[&der!("rsa-server-cert")],
-            scheme,
-            signature,
-        )
+    /// Verifies `server_cert` against `ca` with the last byte of its signature changed.
+    #[cfg(any(feature = "rsa", feature = "p384", feature = "ed25519"))]
+    fn verify_with_a_changed_signature(
+        ca: &[u8],
+        mut server_cert: std::vec::Vec<u8>,
+    ) -> Result<(), TlsError> {
+        let last = server_cert.len() - 1;
+        server_cert[last] = !server_cert[last];
+        verify(ca, &[&server_cert], "localhost")
     }
 
-    #[cfg(feature = "rsa")]
-    fn rsa_key() -> PKey<Private> {
-        key(include_str!("../tests/data/rsa-server-key.pem"))
-    }
-
-    #[test]
-    fn server_cert_signed_by_the_ca_is_accepted() {
-        assert_matches!(
-            verify(&der!("ca-cert"), &[&der!("server-cert")], "localhost"),
-            Ok(())
-        );
+    /// Runs `chain` through a verifier with `Clock`, for localhost, with `ca` as the anchor.
+    fn verify_with_clock<Clock: TlsClock>(ca: &[u8], chain: &[&[u8]]) -> Result<(), TlsError> {
+        let message = message(chain);
+        let mut verifier = CertVerifier::<Aes128GcmSha256, Clock, 4096>::new(Certificate::X509(ca));
+        verifier.set_hostname_verification("localhost")?;
+        verifier.verify_certificate(&embassy_crypto::Sha256::new(), parse(&message))
     }
 
     #[test]
@@ -434,80 +410,6 @@ mod cert_verifier_tests {
         assert_matches!(
             verifier.verify_certificate(&embassy_crypto::Sha256::new(), parse(&message)),
             Err(TlsError::MissingServerName)
-        );
-    }
-
-    // im-server-cert.pem names IP 127.0.0.1 in its subjectAltName.
-    #[test]
-    fn an_ip_address_server_name_is_checked_against_the_certificate() {
-        let chain = [&der!("im-server-cert")[..], &der!("im-cert")];
-        assert_matches!(verify(&der!("ca-cert"), &chain, "127.0.0.1"), Ok(()));
-        assert_matches!(
-            verify(&der!("ca-cert"), &chain, "127.0.0.2"),
-            Err(TlsError::InvalidCertificate)
-        );
-    }
-
-    #[test]
-    fn server_cert_and_intermediate_are_accepted() {
-        let chain = [&der!("im-server-cert")[..], &der!("im-cert")];
-        assert_matches!(verify(&der!("ca-cert"), &chain, "localhost"), Ok(()));
-    }
-
-    /// A verifier whose `CERT_SIZE` holds `im-server-cert.pem`, 442 bytes, but not the chain
-    /// with `im-cert.pem`, 486 bytes.
-    type SmallVerifier<'a> = CertVerifier<'a, Aes128GcmSha256, SystemTime, 512>;
-
-    #[cfg(feature = "p256")]
-    #[test]
-    fn cert_size_needs_to_hold_only_the_server_certificate() {
-        let message = message(&[&der!("im-server-cert"), &der!("im-cert")]);
-        let ca = der!("ca-cert");
-        let mut verifier = SmallVerifier::new(Certificate::X509(&ca));
-        verifier.set_hostname_verification("localhost").unwrap();
-        let result = verifier.verify_certificate(&embassy_crypto::Sha256::new(), parse(&message));
-        assert_matches!(result, Ok(()));
-        let key = key(include_str!("../tests/data/im-server-key.pem"));
-        let signature = sign(&key, MessageDigest::sha256());
-        assert_matches!(
-            verifier.verify_signature(CertificateVerifyRef {
-                signature_scheme: SignatureScheme::EcdsaSecp256r1Sha256,
-                signature: &signature,
-            }),
-            Ok(())
-        );
-    }
-
-    #[cfg(feature = "rsa")]
-    #[test]
-    fn a_server_certificate_larger_than_cert_size_is_refused() {
-        let message = message(&[&der!("rsa-server-cert")]);
-        let ca = der!("rsa-ca-cert");
-        let mut verifier = SmallVerifier::new(Certificate::X509(&ca));
-        verifier.set_hostname_verification("localhost").unwrap();
-        assert_matches!(
-            verifier.verify_certificate(&embassy_crypto::Sha256::new(), parse(&message)),
-            Err(TlsError::OutOfMemory)
-        );
-    }
-
-    #[test]
-    fn chain_that_does_not_reach_the_ca_is_rejected() {
-        let chain = [&der!("im-server-cert")[..], &der!("im-cert")];
-        assert_matches!(
-            verify(&der!("other-root-cert"), &chain, "localhost"),
-            Err(TlsError::InvalidCertificate)
-        );
-    }
-
-    // The server's own certificate comes first (RFC 9846, section 4.5.1). The intermediate is a
-    // CA and is not valid for the name, so taking it as the server's certificate must fail.
-    #[test]
-    fn chain_with_the_intermediate_first_is_rejected() {
-        let chain = [&der!("im-cert")[..], &der!("im-server-cert")];
-        assert_matches!(
-            verify(&der!("ca-cert"), &chain, "localhost"),
-            Err(TlsError::InvalidCertificate)
         );
     }
 
@@ -541,14 +443,6 @@ mod cert_verifier_tests {
         assert_matches!(verify_with_raw_public_key(1), Err(TlsError::DecodeError));
     }
 
-    #[test]
-    fn server_cert_for_another_name_is_rejected() {
-        assert_matches!(
-            verify(&der!("ca-cert"), &[&der!("server-cert")], "example.com"),
-            Err(TlsError::InvalidCertificate)
-        );
-    }
-
     // `open` sets the name before it sends the ClientHello, so a name the ClientHello's SNI check
     // could misjudge never reaches the wire.
     #[test]
@@ -577,322 +471,6 @@ mod cert_verifier_tests {
                 Err(TlsError::InvalidCertificate)
             );
         }
-    }
-
-    // TLS 1.3 names no scheme for P-256 with SHA-384, so the client does not advertise it.
-    #[cfg(feature = "p256")]
-    #[test]
-    fn server_cert_signed_with_p256_and_sha384_is_rejected() {
-        assert_matches!(
-            verify(
-                &der!("ca-cert"),
-                &[&der!("sha384-server-cert")],
-                "localhost"
-            ),
-            Err(TlsError::InvalidCertificate)
-        );
-    }
-
-    #[cfg(feature = "p384")]
-    #[test]
-    fn server_cert_signed_with_p384_and_sha384_is_accepted() {
-        assert_matches!(
-            verify(
-                &der!("p384-ca-cert"),
-                &[&der!("p384-server-cert")],
-                "localhost"
-            ),
-            Ok(())
-        );
-    }
-
-    #[cfg(feature = "p384")]
-    #[test]
-    fn server_cert_signed_with_p384_and_sha256_is_rejected() {
-        let chain = [&der!("p384-sha256-server-cert")[..]];
-        assert_matches!(
-            verify(&der!("p384-ca-cert"), &chain, "localhost"),
-            Err(TlsError::InvalidCertificate)
-        );
-    }
-
-    #[cfg(feature = "ed25519")]
-    #[test]
-    fn server_cert_signed_with_ed25519_is_accepted() {
-        assert_matches!(
-            verify(&der!("ed-ca-cert"), &[&der!("ed-server-cert")], "localhost"),
-            Ok(())
-        );
-    }
-
-    #[cfg(feature = "rsa")]
-    #[test]
-    fn server_cert_signed_with_rsa_is_accepted() {
-        assert_matches!(
-            verify(
-                &der!("rsa-ca-cert"),
-                &[&der!("rsa-server-cert")],
-                "localhost"
-            ),
-            Ok(())
-        );
-    }
-
-    /// Verifies `server_cert` against `ca` with the last byte of its signature changed.
-    #[cfg(any(feature = "rsa", feature = "p384", feature = "ed25519"))]
-    fn verify_with_a_changed_signature(
-        ca: &[u8],
-        mut server_cert: std::vec::Vec<u8>,
-    ) -> Result<(), TlsError> {
-        let last = server_cert.len() - 1;
-        server_cert[last] = !server_cert[last];
-        verify(ca, &[&server_cert], "localhost")
-    }
-
-    #[cfg(feature = "rsa")]
-    #[test]
-    fn server_cert_with_a_changed_rsa_signature_is_rejected() {
-        assert_matches!(
-            verify_with_a_changed_signature(&der!("rsa-ca-cert"), der!("rsa-server-cert")),
-            Err(TlsError::InvalidCertificate)
-        );
-    }
-
-    #[cfg(feature = "p384")]
-    #[test]
-    fn server_cert_with_a_changed_p384_signature_is_rejected() {
-        assert_matches!(
-            verify_with_a_changed_signature(&der!("p384-ca-cert"), der!("p384-server-cert")),
-            Err(TlsError::InvalidCertificate)
-        );
-    }
-
-    #[cfg(feature = "ed25519")]
-    #[test]
-    fn server_cert_with_a_changed_ed25519_signature_is_rejected() {
-        assert_matches!(
-            verify_with_a_changed_signature(&der!("ed-ca-cert"), der!("ed-server-cert")),
-            Err(TlsError::InvalidCertificate)
-        );
-    }
-
-    #[cfg(feature = "p256")]
-    #[test]
-    fn certificate_verify_with_p256_is_accepted() {
-        let key = key(include_str!("../tests/data/server-key.pem"));
-        let result = verify_handshake(
-            &der!("ca-cert"),
-            &[&der!("server-cert")],
-            SignatureScheme::EcdsaSecp256r1Sha256,
-            &sign(&key, MessageDigest::sha256()),
-        );
-        assert_matches!(result, Ok(()));
-    }
-
-    #[cfg(feature = "p256")]
-    #[test]
-    fn certificate_verify_with_a_wrong_signature_is_rejected() {
-        let key = key(include_str!("../tests/data/server-key.pem"));
-        let mut signature = sign(&key, MessageDigest::sha256());
-        let last = signature.len() - 1;
-        signature[last] ^= 1;
-        let result = verify_handshake(
-            &der!("ca-cert"),
-            &[&der!("server-cert")],
-            SignatureScheme::EcdsaSecp256r1Sha256,
-            &signature,
-        );
-        assert_matches!(result, Err(TlsError::InvalidSignature));
-    }
-
-    #[cfg(feature = "p384")]
-    #[test]
-    fn certificate_verify_with_p384_is_accepted() {
-        let key = key(include_str!("../tests/data/p384-key-server-key.pem"));
-        let result = verify_handshake(
-            &der!("p384-ca-cert"),
-            &[&der!("p384-key-server-cert")],
-            SignatureScheme::EcdsaSecp384r1Sha384,
-            &sign(&key, MessageDigest::sha384()),
-        );
-        assert_matches!(result, Ok(()));
-    }
-
-    #[cfg(feature = "ed25519")]
-    #[test]
-    fn certificate_verify_with_ed25519_is_accepted() {
-        let key = key(include_str!("../tests/data/ed-server-key.pem"));
-        let result = verify_handshake(
-            &der!("ed-ca-cert"),
-            &[&der!("ed-server-cert")],
-            SignatureScheme::Ed25519,
-            &sign_ed25519(&key),
-        );
-        assert_matches!(result, Ok(()));
-    }
-
-    #[cfg(feature = "rsa")]
-    #[test]
-    fn certificate_verify_with_rsa_pss_and_sha256_is_accepted() {
-        let signature = sign_rsa_pss(&rsa_key(), MessageDigest::sha256());
-        assert_matches!(
-            verify_rsa(SignatureScheme::RsaPssRsaeSha256, &signature),
-            Ok(())
-        );
-    }
-
-    #[cfg(feature = "rsa")]
-    #[test]
-    fn certificate_verify_with_rsa_pss_and_sha384_is_accepted() {
-        let signature = sign_rsa_pss(&rsa_key(), MessageDigest::sha384());
-        assert_matches!(
-            verify_rsa(SignatureScheme::RsaPssRsaeSha384, &signature),
-            Ok(())
-        );
-    }
-
-    #[cfg(feature = "rsa")]
-    #[test]
-    fn certificate_verify_with_rsa_pss_and_sha512_is_accepted() {
-        let signature = sign_rsa_pss(&rsa_key(), MessageDigest::sha512());
-        assert_matches!(
-            verify_rsa(SignatureScheme::RsaPssRsaeSha512, &signature),
-            Ok(())
-        );
-    }
-
-    #[cfg(feature = "rsa")]
-    #[test]
-    fn certificate_verify_claiming_another_hash_than_it_used_is_rejected() {
-        let signature = sign_rsa_pss(&rsa_key(), MessageDigest::sha256());
-        assert_matches!(
-            verify_rsa(SignatureScheme::RsaPssRsaeSha384, &signature),
-            Err(TlsError::InvalidSignature)
-        );
-    }
-
-    // RFC 9846, section 4.3.3: the rsa_pkcs1 schemes are for signatures in certificates only, so a
-    // CertificateVerify that claims one is refused even when the client offers them.
-    #[cfg(feature = "rsa")]
-    #[test]
-    fn certificate_verify_with_rsa_pkcs1_is_rejected() {
-        let signature = sign(&rsa_key(), MessageDigest::sha256());
-        assert_matches!(
-            verify_rsa(SignatureScheme::RsaPkcs1Sha256, &signature),
-            Err(TlsError::InvalidSignatureScheme)
-        );
-    }
-
-    #[cfg(feature = "rsa")]
-    #[test]
-    fn certificate_verify_with_a_1024_bit_rsa_key_is_rejected() {
-        let key = key(include_str!("../tests/data/rsa1024-server-key.pem"));
-        let result = verify_handshake(
-            &der!("rsa-ca-cert"),
-            &[&der!("rsa1024-server-cert")],
-            SignatureScheme::RsaPssRsaeSha256,
-            &sign_rsa_pss(&key, MessageDigest::sha256()),
-        );
-        assert_matches!(result, Err(TlsError::InvalidSignature));
-    }
-
-    #[cfg(feature = "p256")]
-    #[test]
-    fn certificate_verify_claiming_rsa_for_an_ecdsa_key_is_rejected() {
-        let key = key(include_str!("../tests/data/server-key.pem"));
-        let result = verify_handshake(
-            &der!("ca-cert"),
-            &[&der!("server-cert")],
-            SignatureScheme::RsaPssRsaeSha256,
-            &sign(&key, MessageDigest::sha256()),
-        );
-        assert!(result.is_err(), "{result:?}");
-    }
-
-    /// Runs `chain` through a verifier with `Clock`, for localhost, with `ca` as the anchor.
-    fn verify_with_clock<Clock: TlsClock>(ca: &[u8], chain: &[&[u8]]) -> Result<(), TlsError> {
-        let message = message(chain);
-        let mut verifier = CertVerifier::<Aes128GcmSha256, Clock, 4096>::new(Certificate::X509(ca));
-        verifier.set_hostname_verification("localhost")?;
-        verifier.verify_certificate(&embassy_crypto::Sha256::new(), parse(&message))
-    }
-
-    /// A clock of the application's own that does not have the time yet.
-    struct UnsyncedClock;
-
-    impl TlsClock for UnsyncedClock {
-        fn now() -> Option<u64> {
-            None
-        }
-    }
-
-    #[test]
-    fn expired_server_cert_is_rejected() {
-        let chain = [&der!("expired-server-cert")[..]];
-        assert_matches!(
-            verify(&der!("ca-cert"), &chain, "localhost"),
-            Err(TlsError::InvalidCertificate)
-        );
-    }
-
-    #[test]
-    fn expired_server_cert_is_accepted_by_any_clock_without_the_time() {
-        let chain = [&der!("expired-server-cert")[..]];
-        assert_matches!(
-            verify_with_clock::<UnsyncedClock>(&der!("ca-cert"), &chain),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn expired_server_cert_is_accepted_when_dates_are_ignored() {
-        let chain = [&der!("expired-server-cert")[..]];
-        assert_matches!(
-            verify_with_clock::<InsecureIgnoreDates>(&der!("ca-cert"), &chain),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn not_yet_valid_server_cert_is_accepted_when_dates_are_ignored() {
-        let chain = [&der!("future-server-cert")[..]];
-        assert_matches!(
-            verify_with_clock::<InsecureIgnoreDates>(&der!("ca-cert"), &chain),
-            Ok(())
-        );
-    }
-
-    // im-cert.pem's notBefore is later than im-server-cert.pem's, so only the latest notBefore
-    // of the chain falls within both certificates.
-    #[test]
-    fn intermediate_issued_after_the_server_cert_is_accepted_when_dates_are_ignored() {
-        let chain = [&der!("im-server-cert")[..], &der!("im-cert")];
-        assert_matches!(
-            verify_with_clock::<InsecureIgnoreDates>(&der!("ca-cert"), &chain),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn chain_whose_validity_periods_do_not_overlap_is_rejected_when_dates_are_ignored() {
-        let chain = [&der!("late-im-server-cert")[..], &der!("expired-im-cert")];
-        assert_matches!(
-            verify_with_clock::<InsecureIgnoreDates>(&der!("ca-cert"), &chain),
-            Err(TlsError::InvalidCertificate)
-        );
-    }
-
-    #[test]
-    fn ignoring_dates_keeps_the_name_check() {
-        let ca = der!("ca-cert");
-        let mut verifier =
-            CertVerifier::<Aes128GcmSha256, InsecureIgnoreDates, 4096>::new(Certificate::X509(&ca));
-        verifier.set_hostname_verification("example.com").unwrap();
-        let message = message(&[&der!("expired-server-cert")]);
-        assert_matches!(
-            verifier.verify_certificate(&embassy_crypto::Sha256::new(), parse(&message)),
-            Err(TlsError::InvalidCertificate)
-        );
     }
 
     #[test]
@@ -944,6 +522,431 @@ mod cert_verifier_tests {
         for tbs in [v1, v3] {
             let certificate = tlv(0x30, &tlv(0x30, &tbs));
             assert_eq!(not_before(&certificate).ok(), Some(1_577_836_800));
+        }
+    }
+
+    /// `ca-cert.pem` and the certificates it issued use P-256 keys. Without `p256` the verifier
+    /// refuses every chain from them, so a test that expects a refusal would pass for the wrong
+    /// reason.
+    #[cfg(feature = "p256")]
+    mod p256 {
+        use super::*;
+
+        #[test]
+        fn server_cert_signed_by_the_ca_is_accepted() {
+            assert_matches!(
+                verify(&der!("ca-cert"), &[&der!("server-cert")], "localhost"),
+                Ok(())
+            );
+        }
+
+        // im-server-cert.pem names IP 127.0.0.1 in its subjectAltName.
+        #[test]
+        fn an_ip_address_server_name_is_checked_against_the_certificate() {
+            let chain = [&der!("im-server-cert")[..], &der!("im-cert")];
+            assert_matches!(verify(&der!("ca-cert"), &chain, "127.0.0.1"), Ok(()));
+            assert_matches!(
+                verify(&der!("ca-cert"), &chain, "127.0.0.2"),
+                Err(TlsError::InvalidCertificate)
+            );
+        }
+
+        #[test]
+        fn server_cert_and_intermediate_are_accepted() {
+            let chain = [&der!("im-server-cert")[..], &der!("im-cert")];
+            assert_matches!(verify(&der!("ca-cert"), &chain, "localhost"), Ok(()));
+        }
+
+        /// A verifier whose `CERT_SIZE` holds `im-server-cert.pem`, 442 bytes, but not the chain
+        /// with `im-cert.pem`, 486 bytes.
+        type SmallVerifier<'a> = CertVerifier<'a, Aes128GcmSha256, SystemTime, 512>;
+
+        #[test]
+        fn cert_size_needs_to_hold_only_the_server_certificate() {
+            let message = message(&[&der!("im-server-cert"), &der!("im-cert")]);
+            let ca = der!("ca-cert");
+            let mut verifier = SmallVerifier::new(Certificate::X509(&ca));
+            verifier.set_hostname_verification("localhost").unwrap();
+            let result =
+                verifier.verify_certificate(&embassy_crypto::Sha256::new(), parse(&message));
+            assert_matches!(result, Ok(()));
+            let key = key(include_str!("../tests/data/im-server-key.pem"));
+            let signature = sign(&key, MessageDigest::sha256());
+            assert_matches!(
+                verifier.verify_signature(CertificateVerifyRef {
+                    signature_scheme: SignatureScheme::EcdsaSecp256r1Sha256,
+                    signature: &signature,
+                }),
+                Ok(())
+            );
+        }
+
+        #[test]
+        fn chain_that_does_not_reach_the_ca_is_rejected() {
+            let chain = [&der!("im-server-cert")[..], &der!("im-cert")];
+            assert_matches!(
+                verify(&der!("other-root-cert"), &chain, "localhost"),
+                Err(TlsError::InvalidCertificate)
+            );
+        }
+
+        // The server's own certificate comes first (RFC 9846, section 4.5.1). The intermediate is a
+        // CA and is not valid for the name, so taking it as the server's certificate must fail.
+        #[test]
+        fn chain_with_the_intermediate_first_is_rejected() {
+            let chain = [&der!("im-cert")[..], &der!("im-server-cert")];
+            assert_matches!(
+                verify(&der!("ca-cert"), &chain, "localhost"),
+                Err(TlsError::InvalidCertificate)
+            );
+        }
+
+        #[test]
+        fn server_cert_for_another_name_is_rejected() {
+            assert_matches!(
+                verify(&der!("ca-cert"), &[&der!("server-cert")], "example.com"),
+                Err(TlsError::InvalidCertificate)
+            );
+        }
+
+        // TLS 1.3 names no scheme for P-256 with SHA-384, so the client does not advertise it.
+        #[test]
+        fn server_cert_signed_with_p256_and_sha384_is_rejected() {
+            assert_matches!(
+                verify(
+                    &der!("ca-cert"),
+                    &[&der!("sha384-server-cert")],
+                    "localhost"
+                ),
+                Err(TlsError::InvalidCertificate)
+            );
+        }
+
+        #[test]
+        fn certificate_verify_with_p256_is_accepted() {
+            let key = key(include_str!("../tests/data/server-key.pem"));
+            let result = verify_handshake(
+                &der!("ca-cert"),
+                &[&der!("server-cert")],
+                SignatureScheme::EcdsaSecp256r1Sha256,
+                &sign(&key, MessageDigest::sha256()),
+            );
+            assert_matches!(result, Ok(()));
+        }
+
+        #[test]
+        fn certificate_verify_with_a_wrong_signature_is_rejected() {
+            let key = key(include_str!("../tests/data/server-key.pem"));
+            let mut signature = sign(&key, MessageDigest::sha256());
+            let last = signature.len() - 1;
+            signature[last] ^= 1;
+            let result = verify_handshake(
+                &der!("ca-cert"),
+                &[&der!("server-cert")],
+                SignatureScheme::EcdsaSecp256r1Sha256,
+                &signature,
+            );
+            assert_matches!(result, Err(TlsError::InvalidSignature));
+        }
+
+        #[test]
+        fn certificate_verify_claiming_rsa_for_an_ecdsa_key_is_rejected() {
+            let key = key(include_str!("../tests/data/server-key.pem"));
+            let result = verify_handshake(
+                &der!("ca-cert"),
+                &[&der!("server-cert")],
+                SignatureScheme::RsaPssRsaeSha256,
+                &sign(&key, MessageDigest::sha256()),
+            );
+            assert!(result.is_err(), "{result:?}");
+        }
+
+        /// A clock of the application's own that does not have the time yet.
+        struct UnsyncedClock;
+
+        impl TlsClock for UnsyncedClock {
+            fn now() -> Option<u64> {
+                None
+            }
+        }
+
+        #[test]
+        fn expired_server_cert_is_rejected() {
+            let chain = [&der!("expired-server-cert")[..]];
+            assert_matches!(
+                verify(&der!("ca-cert"), &chain, "localhost"),
+                Err(TlsError::InvalidCertificate)
+            );
+        }
+
+        #[test]
+        fn expired_server_cert_is_accepted_by_any_clock_without_the_time() {
+            let chain = [&der!("expired-server-cert")[..]];
+            assert_matches!(
+                verify_with_clock::<UnsyncedClock>(&der!("ca-cert"), &chain),
+                Ok(())
+            );
+        }
+
+        #[test]
+        fn expired_server_cert_is_accepted_when_dates_are_ignored() {
+            let chain = [&der!("expired-server-cert")[..]];
+            assert_matches!(
+                verify_with_clock::<InsecureIgnoreDates>(&der!("ca-cert"), &chain),
+                Ok(())
+            );
+        }
+
+        #[test]
+        fn not_yet_valid_server_cert_is_accepted_when_dates_are_ignored() {
+            let chain = [&der!("future-server-cert")[..]];
+            assert_matches!(
+                verify_with_clock::<InsecureIgnoreDates>(&der!("ca-cert"), &chain),
+                Ok(())
+            );
+        }
+
+        // im-cert.pem's notBefore is later than im-server-cert.pem's, so only the latest notBefore
+        // of the chain falls within both certificates.
+        #[test]
+        fn intermediate_issued_after_the_server_cert_is_accepted_when_dates_are_ignored() {
+            let chain = [&der!("im-server-cert")[..], &der!("im-cert")];
+            assert_matches!(
+                verify_with_clock::<InsecureIgnoreDates>(&der!("ca-cert"), &chain),
+                Ok(())
+            );
+        }
+
+        #[test]
+        fn chain_whose_validity_periods_do_not_overlap_is_rejected_when_dates_are_ignored() {
+            let chain = [&der!("late-im-server-cert")[..], &der!("expired-im-cert")];
+            assert_matches!(
+                verify_with_clock::<InsecureIgnoreDates>(&der!("ca-cert"), &chain),
+                Err(TlsError::InvalidCertificate)
+            );
+        }
+
+        #[test]
+        fn ignoring_dates_keeps_the_name_check() {
+            let ca = der!("ca-cert");
+            let mut verifier = CertVerifier::<Aes128GcmSha256, InsecureIgnoreDates, 4096>::new(
+                Certificate::X509(&ca),
+            );
+            verifier.set_hostname_verification("example.com").unwrap();
+            let message = message(&[&der!("expired-server-cert")]);
+            assert_matches!(
+                verifier.verify_certificate(&embassy_crypto::Sha256::new(), parse(&message)),
+                Err(TlsError::InvalidCertificate)
+            );
+        }
+    }
+
+    #[cfg(feature = "p384")]
+    mod p384 {
+        use super::*;
+
+        #[test]
+        fn server_cert_signed_with_p384_and_sha384_is_accepted() {
+            assert_matches!(
+                verify(
+                    &der!("p384-ca-cert"),
+                    &[&der!("p384-server-cert")],
+                    "localhost"
+                ),
+                Ok(())
+            );
+        }
+
+        #[test]
+        fn server_cert_signed_with_p384_and_sha256_is_rejected() {
+            let chain = [&der!("p384-sha256-server-cert")[..]];
+            assert_matches!(
+                verify(&der!("p384-ca-cert"), &chain, "localhost"),
+                Err(TlsError::InvalidCertificate)
+            );
+        }
+
+        #[test]
+        fn server_cert_with_a_changed_p384_signature_is_rejected() {
+            assert_matches!(
+                verify_with_a_changed_signature(&der!("p384-ca-cert"), der!("p384-server-cert")),
+                Err(TlsError::InvalidCertificate)
+            );
+        }
+
+        #[test]
+        fn certificate_verify_with_p384_is_accepted() {
+            let key = key(include_str!("../tests/data/p384-key-server-key.pem"));
+            let result = verify_handshake(
+                &der!("p384-ca-cert"),
+                &[&der!("p384-key-server-cert")],
+                SignatureScheme::EcdsaSecp384r1Sha384,
+                &sign(&key, MessageDigest::sha384()),
+            );
+            assert_matches!(result, Ok(()));
+        }
+    }
+
+    #[cfg(feature = "ed25519")]
+    mod ed25519 {
+        use super::*;
+
+        fn sign_ed25519(key: &PKey<Private>) -> std::vec::Vec<u8> {
+            let mut signer = Signer::new_without_digest(key).unwrap();
+            signer.sign_oneshot_to_vec(&signed_content()).unwrap()
+        }
+
+        #[test]
+        fn server_cert_signed_with_ed25519_is_accepted() {
+            assert_matches!(
+                verify(&der!("ed-ca-cert"), &[&der!("ed-server-cert")], "localhost"),
+                Ok(())
+            );
+        }
+
+        #[test]
+        fn server_cert_with_a_changed_ed25519_signature_is_rejected() {
+            assert_matches!(
+                verify_with_a_changed_signature(&der!("ed-ca-cert"), der!("ed-server-cert")),
+                Err(TlsError::InvalidCertificate)
+            );
+        }
+
+        #[test]
+        fn certificate_verify_with_ed25519_is_accepted() {
+            let key = key(include_str!("../tests/data/ed-server-key.pem"));
+            let result = verify_handshake(
+                &der!("ed-ca-cert"),
+                &[&der!("ed-server-cert")],
+                SignatureScheme::Ed25519,
+                &sign_ed25519(&key),
+            );
+            assert_matches!(result, Ok(()));
+        }
+    }
+
+    #[cfg(feature = "rsa")]
+    mod rsa {
+        use super::*;
+        use openssl::rsa::Padding;
+        use openssl::sign::RsaPssSaltlen;
+
+        fn sign_rsa_pss(key: &PKey<Private>, digest: MessageDigest) -> std::vec::Vec<u8> {
+            let mut signer = Signer::new(digest, key).unwrap();
+            signer.set_rsa_padding(Padding::PKCS1_PSS).unwrap();
+            signer
+                .set_rsa_pss_saltlen(RsaPssSaltlen::DIGEST_LENGTH)
+                .unwrap();
+            signer.set_rsa_mgf1_md(digest).unwrap();
+            signer.sign_oneshot_to_vec(&signed_content()).unwrap()
+        }
+
+        /// Verifies a `CertificateVerify` from `rsa-server-key.pem`, claiming `scheme`.
+        fn verify_rsa(scheme: SignatureScheme, signature: &[u8]) -> Result<(), TlsError> {
+            verify_handshake(
+                &der!("rsa-ca-cert"),
+                &[&der!("rsa-server-cert")],
+                scheme,
+                signature,
+            )
+        }
+
+        fn rsa_key() -> PKey<Private> {
+            key(include_str!("../tests/data/rsa-server-key.pem"))
+        }
+
+        /// A verifier whose `CERT_SIZE` is smaller than `rsa-server-cert.pem`.
+        type SmallVerifier<'a> = CertVerifier<'a, Aes128GcmSha256, SystemTime, 512>;
+
+        #[test]
+        fn a_server_certificate_larger_than_cert_size_is_refused() {
+            let message = message(&[&der!("rsa-server-cert")]);
+            let ca = der!("rsa-ca-cert");
+            let mut verifier = SmallVerifier::new(Certificate::X509(&ca));
+            verifier.set_hostname_verification("localhost").unwrap();
+            assert_matches!(
+                verifier.verify_certificate(&embassy_crypto::Sha256::new(), parse(&message)),
+                Err(TlsError::OutOfMemory)
+            );
+        }
+
+        #[test]
+        fn server_cert_signed_with_rsa_is_accepted() {
+            assert_matches!(
+                verify(
+                    &der!("rsa-ca-cert"),
+                    &[&der!("rsa-server-cert")],
+                    "localhost"
+                ),
+                Ok(())
+            );
+        }
+
+        #[test]
+        fn server_cert_with_a_changed_rsa_signature_is_rejected() {
+            assert_matches!(
+                verify_with_a_changed_signature(&der!("rsa-ca-cert"), der!("rsa-server-cert")),
+                Err(TlsError::InvalidCertificate)
+            );
+        }
+
+        #[test]
+        fn certificate_verify_with_rsa_pss_and_sha256_is_accepted() {
+            let signature = sign_rsa_pss(&rsa_key(), MessageDigest::sha256());
+            assert_matches!(
+                verify_rsa(SignatureScheme::RsaPssRsaeSha256, &signature),
+                Ok(())
+            );
+        }
+
+        #[test]
+        fn certificate_verify_with_rsa_pss_and_sha384_is_accepted() {
+            let signature = sign_rsa_pss(&rsa_key(), MessageDigest::sha384());
+            assert_matches!(
+                verify_rsa(SignatureScheme::RsaPssRsaeSha384, &signature),
+                Ok(())
+            );
+        }
+
+        #[test]
+        fn certificate_verify_with_rsa_pss_and_sha512_is_accepted() {
+            let signature = sign_rsa_pss(&rsa_key(), MessageDigest::sha512());
+            assert_matches!(
+                verify_rsa(SignatureScheme::RsaPssRsaeSha512, &signature),
+                Ok(())
+            );
+        }
+
+        #[test]
+        fn certificate_verify_claiming_another_hash_than_it_used_is_rejected() {
+            let signature = sign_rsa_pss(&rsa_key(), MessageDigest::sha256());
+            assert_matches!(
+                verify_rsa(SignatureScheme::RsaPssRsaeSha384, &signature),
+                Err(TlsError::InvalidSignature)
+            );
+        }
+
+        // RFC 9846, section 4.3.3: the rsa_pkcs1 schemes are for signatures in certificates only,
+        // so a CertificateVerify that claims one is refused even when the client offers them.
+        #[test]
+        fn certificate_verify_with_rsa_pkcs1_is_rejected() {
+            let signature = sign(&rsa_key(), MessageDigest::sha256());
+            assert_matches!(
+                verify_rsa(SignatureScheme::RsaPkcs1Sha256, &signature),
+                Err(TlsError::InvalidSignatureScheme)
+            );
+        }
+
+        #[test]
+        fn certificate_verify_with_a_1024_bit_rsa_key_is_rejected() {
+            let key = key(include_str!("../tests/data/rsa1024-server-key.pem"));
+            let result = verify_handshake(
+                &der!("rsa-ca-cert"),
+                &[&der!("rsa1024-server-cert")],
+                SignatureScheme::RsaPssRsaeSha256,
+                &sign_rsa_pss(&key, MessageDigest::sha256()),
+            );
+            assert_matches!(result, Err(TlsError::InvalidSignature));
         }
     }
 }
