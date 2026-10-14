@@ -143,6 +143,10 @@ impl<T: Write> Write for SlowFlush<T> {
 /// inner content type and the 16-byte tag. The flush sweep fails if this is wrong.
 const RECORD_OVERHEAD: usize = 22;
 
+/// A write buffer that holds the largest ClientHello the crate sends, and is smaller than the
+/// data a test writes, so a write fills a record.
+const SMALL_WRITE_BUFFER: usize = 1536;
+
 /// Polls `future` once and drops it, as a `select` does when another branch wins. Returns
 /// whether it completed.
 fn poll_once_then_drop<F: Future>(future: F) -> bool {
@@ -213,7 +217,7 @@ async fn write_dropped_while_flushing_a_full_record_does_not_repeat_data() {
     let budget = Rc::new(Cell::new(None));
     let mut read_record_buffer = [0; 16384];
     // A small write buffer, so one write fills the record.
-    let mut write_record_buffer = [0; 1024];
+    let mut write_record_buffer = [0; SMALL_WRITE_BUFFER];
     let config = TlsConfig::new().with_server_name("localhost");
     let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
         Stalling {
@@ -305,8 +309,8 @@ async fn write_dropped_at_every_byte_of_a_full_record_does_not_repeat_data() {
         .expect("error connecting to server");
     let budget = Rc::new(Cell::new(None));
     let mut read_record_buffer = [0; 16384];
-    // A small write buffer, so each write fills a short record.
-    let mut write_record_buffer = [0; 256];
+    // A small write buffer, so each write fills a record.
+    let mut write_record_buffer = [0; SMALL_WRITE_BUFFER];
     let config = TlsConfig::new().with_server_name("localhost");
     let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
         Stalling {
@@ -320,7 +324,8 @@ async fn write_dropped_at_every_byte_of_a_full_record_does_not_repeat_data() {
         .await
         .expect("error establishing TLS connection");
 
-    let data: Vec<u8> = (0..30000u32).map(|i| b'a' + (i % 26) as u8).collect();
+    // More records than a record has bytes, so the cuts reach every byte of one.
+    let data: Vec<u8> = (0..2_400_000u32).map(|i| b'a' + (i % 26) as u8).collect();
     // The first write fills a record without touching the transport. Its count is the data that
     // one record holds.
     let mut sent = tls.write(&data).await.expect("error writing data");
@@ -492,7 +497,7 @@ async fn write_dropped_while_flushing_the_transport_flushes_it_on_the_next_write
     let flushes = Rc::new(Cell::new(0));
     let mut read_record_buffer = [0; 16384];
     // A small write buffer, so one write fills the record.
-    let mut write_record_buffer = [0; 1024];
+    let mut write_record_buffer = [0; SMALL_WRITE_BUFFER];
     let config = TlsConfig::new().with_server_name("localhost");
     let mut tls: TlsConnection<_, Aes128GcmSha256> = TlsConnection::new(
         SlowFlush {
@@ -508,7 +513,7 @@ async fn write_dropped_while_flushing_the_transport_flushes_it_on_the_next_write
         .await
         .expect("error establishing TLS connection");
 
-    let data: Vec<u8> = (0..1500u32).map(|i| b'a' + (i % 26) as u8).collect();
+    let data: Vec<u8> = (0..3000u32).map(|i| b'a' + (i % 26) as u8).collect();
     let first = tls.write(&data).await.expect("error writing data");
     assert!(first < data.len(), "the first write should fill the record");
     let before = flushes.get();
