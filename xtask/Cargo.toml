@@ -1,0 +1,19 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+embedded-tls = { path = "..", default-features = false, features = ["std", "webpki", "rustpki", "rsa", "p256", "p384", "ed25519"] }
+clap = { version = "4", features = ["derive"] }
+comfy-table = { version = "7", default-features = false }
+embassy-crypto-rustcrypto = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", rev = "822a76ea91f2c0885c6eb0c65fe91181e31133e1", features = ["all"] }
+jiff = { version = "0.2", features = ["serde"] }
+pem-parser = "0.1.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+ureq = "3"

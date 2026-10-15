@@ -9,7 +9,7 @@ homepage = "https://embassy.dev"
 repository = "https://github.com/embassy-rs/embedded-tls"
 license = "Apache-2.0"
 keywords = ["embedded", "async", "tls", "no_std", "network"]
-exclude = [".github"]
+exclude = [".github", ".cargo"]
 
 [package.metadata.docs.rs]
 features = ["webpki", "rustpki", "rsa", "ed25519", "p256", "p384", "x25519", "mlkem"]
