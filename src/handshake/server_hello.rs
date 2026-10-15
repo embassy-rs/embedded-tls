@@ -58,6 +58,18 @@ impl<'a> ServerHello<'a> {
         })
     }
 
+    /// The index of the pre-shared key identity the server selected, or `None` when it selected
+    /// none. A selected pre-shared key authenticates the server in place of a certificate.
+    pub fn selected_psk_identity(&self) -> Option<u16> {
+        self.extensions.iter().find_map(|e| {
+            if let ServerHelloExtension::PreSharedKey(psk) = e {
+                Some(psk.selected_identity)
+            } else {
+                None
+            }
+        })
+    }
+
     /// The ECDH shared secret between our ephemeral key and the server's key share.
     pub fn calculate_shared_secret(
         &self,

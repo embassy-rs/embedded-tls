@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+- Fix the client accepting a server `Finished` without server authentication (#215). The client now requires a verified `Certificate` and `CertificateVerify`, in that order, or a pre-shared key it offered.
 - A `write` or `flush` that is cancelled or fails part way through a TLS record is completed by the next `write` or `flush`.
 - A blocking `read` that fails part way through a record is completed by the next `read`.
 - A record that a `write` fills is sent by the next `write` or `flush`. A caller that flushes after its writes is unaffected.
