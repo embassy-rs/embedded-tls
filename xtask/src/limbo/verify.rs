@@ -85,16 +85,19 @@ fn verify<'a, V: TlsVerifier<Aes128GcmSha256>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::limbo::cases::{Expected, case};
+    use crate::limbo::cases::{Expected, PeerName, case};
 
     const CA: &str = include_str!("../../../tests/data/ca-cert.pem");
     const OTHER_ROOT: &str = include_str!("../../../tests/data/other-root-cert.pem");
     const SERVER: &str = include_str!("../../../tests/data/server-cert.pem");
 
-    /// The server certificate that `ca-cert.pem` issued, checked in 2026, without a host name.
+    /// The server certificate that `ca-cert.pem` issued, for `localhost`, checked in 2026.
     fn server_case(anchors: &[&str], time: &str) -> Case {
         let mut case = case("a::server", "SERVER", &[], Expected::Success);
         case.peer_certificate = SERVER.to_string();
+        case.expected_peer_name = Some(PeerName {
+            value: "localhost".to_string(),
+        });
         case.trusted_certs = anchors.iter().map(|pem| pem.to_string()).collect();
         case.validation_time = Some(time.parse().unwrap());
         case
