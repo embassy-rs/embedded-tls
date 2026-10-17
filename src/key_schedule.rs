@@ -7,8 +7,9 @@ pub type HashOutput<CipherSuite> = <<CipherSuite as TlsCipherSuite>::Hash as Tls
 pub type KeyArray<CipherSuite> = <<CipherSuite as TlsCipherSuite>::Cipher as TlsAead>::Key;
 pub type IvArray = [u8; NONCE_LEN];
 
-// longest label is 12b -> buf <= 2 + 1 + 6 + longest + 1 + hash_out = hash_out + 22
-const LABEL_BUFFER_LEN: usize = 48 + 22;
+// longest label is 12b -> buf <= 2 + 1 + 6 + longest + 1 + hash_out = hash_out + 22.
+// Exporter labels are chosen by the caller (e.g. "EXPORTER-network-time-security" is 30 bytes), so allow 40 more.
+const LABEL_BUFFER_LEN: usize = 48 + 22 + 40;
 
 enum Secret<CipherSuite>
 where
@@ -215,6 +216,8 @@ where
     shared: SharedState<CipherSuite>,
     client_state: WriteKeySchedule<CipherSuite>,
     server_state: ReadKeySchedule<CipherSuite>,
+    /// `Derive-Secret(master secret, "exp master", ClientHello..server Finished)`, kept for [`KeySchedule::export`].
+    exporter_master: Option<HashOutput<CipherSuite>>,
 }
 
 impl<CipherSuite> KeySchedule<CipherSuite>
@@ -232,6 +235,7 @@ where
                 state: KeyScheduleState::new(),
                 transcript_hash: CipherSuite::Hash::new(),
             },
+            exporter_master: None,
         }
     }
 
@@ -316,7 +320,27 @@ where
         self.shared.initialize(zero.as_ref());
 
         self.calculate_traffic_secrets(b"c ap traffic", b"s ap traffic")?;
+        // The transcript here ends at the server Finished, which is the context "exp master" needs.
+        self.exporter_master = Some(self.shared.derive_secret(
+            b"exp master",
+            ContextType::transcript_hash(&self.server_state.transcript_hash),
+        )?);
         self.shared.derived()
+    }
+
+    /// TLS 1.3 exporter (RFC 8446 section 7.5): `HKDF-Expand-Label(Derive-Secret(exporter_master, label, ""),
+    /// "exporter", Hash(context), out.len())`. Only available once the handshake has completed.
+    pub fn export(&self, label: &[u8], context: &[u8], out: &mut [u8]) -> Result<(), TlsError> {
+        let master = self
+            .exporter_master
+            .as_ref()
+            .ok_or(TlsError::InternalError)?;
+        let mut stage = Secret::<CipherSuite>::Uninitialized;
+        stage.replace(Hkdf::<CipherSuite::Hash>::from_prk(master.as_ref())?);
+        let derived = stage.expand_label_hash(label, ContextType::empty_hash())?;
+        stage.replace(Hkdf::<CipherSuite::Hash>::from_prk(derived.as_ref())?);
+        let context_hash = <CipherSuite::Hash as TlsHash>::digest(context);
+        stage.expand_label(b"exporter", ContextType::Hash(context_hash), out)
     }
 
     fn calculate_traffic_secrets(
