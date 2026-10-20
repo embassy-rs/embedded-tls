@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cert_refs: Vec<&[u8]> = certs.iter().map(|c| c.as_slice()).collect();
     let config = TlsServerConfig::new(&cert_refs);
     let signing_key = PrivateKey::from_sec1_der(&key).expect("cannot parse private key");
-    let context = TlsServerContext::new(&config, InsecureNoVerify, &signing_key);
+    let context = TlsServerContext::<InsecureIgnoreDates>::new(&config, &signing_key);
 
     let mut read_buf = [0; 16384];
     let mut write_buf = [0; 16384];

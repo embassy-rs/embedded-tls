@@ -1,4 +1,4 @@
-#![cfg(feature = "server")]
+#![cfg(all(feature = "server", feature = "p256"))]
 
 //! TLS 1.3 server compliance tests.
 //!
@@ -83,7 +83,7 @@ fn run_blocking_server(
         let (stream, _) = listener.accept().unwrap();
         let refs: Vec<&[u8]> = certs.iter().map(|c| c.as_slice()).collect();
         let cfg = config_fn(TlsServerConfig::new(&refs));
-        let ctx = TlsServerContext::new(&cfg, InsecureNoVerify, &signing_key);
+        let ctx = TlsServerContext::<InsecureIgnoreDates>::new(&cfg, &signing_key);
         let mut rb = [0u8; 16384];
         let mut wb = [0u8; 16384];
         let mut tls: blocking::TlsConnection<FromStd<TcpStream>, Aes128GcmSha256> =
@@ -115,7 +115,72 @@ fn run_async_server(
             let stream = tokio::net::TcpStream::from_std(std_stream).unwrap();
             let refs: Vec<&[u8]> = certs.iter().map(|c| c.as_slice()).collect();
             let cfg = config_fn(TlsServerConfig::new(&refs));
-            let ctx = TlsServerContext::new(&cfg, InsecureNoVerify, &signing_key);
+            let ctx = TlsServerContext::<InsecureIgnoreDates>::new(&cfg, &signing_key);
+            let mut rb = [0u8; 16384];
+            let mut wb = [0u8; 16384];
+            let mut tls: TlsConnection<FromTokio<tokio::net::TcpStream>, Aes128GcmSha256> =
+                TlsConnection::new(FromTokio::new(stream), &mut rb, &mut wb);
+            tls.open_server(ctx).await.expect("async handshake failed");
+            let mut rx = [0u8; 4096];
+            let n = tls.read(&mut rx).await.expect("async read failed");
+            tls.write(&rx[..n]).await.expect("async write failed");
+            embedded_io_async::Write::flush(&mut tls)
+                .await
+                .expect("async flush failed");
+            let _ = tls.close().await;
+        });
+    })
+}
+
+// System-time (real clock) server runners, used by the expired-certificate test.
+#[cfg(feature = "std")]
+fn run_blocking_server_systemtime(
+    listener: TcpListener,
+    config_fn: impl FnOnce(TlsServerConfig<'_>) -> TlsServerConfig<'_> + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    let (certs, key) = provider();
+    std::thread::spawn(move || {
+        use embedded_io::Read as ER;
+        use embedded_io::Write as EW;
+        use embedded_io_adapters::std::FromStd;
+        let signing_key = PrivateKey::from_sec1_der(&key).expect("test key parses");
+        let (stream, _) = listener.accept().unwrap();
+        let refs: Vec<&[u8]> = certs.iter().map(|c| c.as_slice()).collect();
+        let cfg = config_fn(TlsServerConfig::new(&refs));
+        let ctx = TlsServerContext::<std::time::SystemTime>::new(&cfg, &signing_key);
+        let mut rb = [0u8; 16384];
+        let mut wb = [0u8; 16384];
+        let mut tls: blocking::TlsConnection<FromStd<TcpStream>, Aes128GcmSha256> =
+            blocking::TlsConnection::new(FromStd::new(stream), &mut rb, &mut wb);
+        tls.open_server(ctx).expect("blocking handshake failed");
+        let mut rx = [0u8; 4096];
+        let n = ER::read(&mut tls, &mut rx).expect("blocking read failed");
+        EW::write(&mut tls, &rx[..n]).expect("blocking write failed");
+        EW::flush(&mut tls).expect("blocking flush failed");
+        let _ = tls.close();
+    })
+}
+
+#[cfg(feature = "std")]
+fn run_async_server_systemtime(
+    listener: TcpListener,
+    config_fn: impl FnOnce(TlsServerConfig<'_>) -> TlsServerConfig<'_> + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    let (certs, key) = provider();
+    std::thread::spawn(move || {
+        use embedded_io_adapters::tokio_1::FromTokio;
+        let signing_key = PrivateKey::from_sec1_der(&key).expect("test key parses");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (std_stream, _) = listener.accept().unwrap();
+            std_stream.set_nonblocking(true).unwrap();
+            let stream = tokio::net::TcpStream::from_std(std_stream).unwrap();
+            let refs: Vec<&[u8]> = certs.iter().map(|c| c.as_slice()).collect();
+            let cfg = config_fn(TlsServerConfig::new(&refs));
+            let ctx = TlsServerContext::<std::time::SystemTime>::new(&cfg, &signing_key);
             let mut rb = [0u8; 16384];
             let mut wb = [0u8; 16384];
             let mut tls: TlsConnection<FromTokio<tokio::net::TcpStream>, Aes128GcmSha256> =
@@ -399,7 +464,7 @@ fn test_large_payload() {
                 let (stream, _) = l.accept().unwrap();
                 let refs: Vec<&[u8]> = certs.iter().map(|c| c.as_slice()).collect();
                 let cfg = TlsServerConfig::new(&refs);
-                let ctx = TlsServerContext::new(&cfg, InsecureNoVerify, &signing_key);
+                let ctx = TlsServerContext::<InsecureIgnoreDates>::new(&cfg, &signing_key);
                 let mut rb = [0u8; 16384];
                 let mut wb = [0u8; 16384];
                 let mut tls: blocking::TlsConnection<FromStd<TcpStream>, Aes128GcmSha256> =
@@ -435,7 +500,7 @@ fn test_large_payload() {
                     let stream = tokio::net::TcpStream::from_std(ss).unwrap();
                     let refs: Vec<&[u8]> = certs.iter().map(|c| c.as_slice()).collect();
                     let cfg = TlsServerConfig::new(&refs);
-                    let ctx = TlsServerContext::new(&cfg, InsecureNoVerify, &signing_key);
+                    let ctx = TlsServerContext::<InsecureIgnoreDates>::new(&cfg, &signing_key);
                     let mut rb = [0u8; 16384];
                     let mut wb = [0u8; 16384];
                     let mut tls: TlsConnection<FromTokio<tokio::net::TcpStream>, Aes128GcmSha256> =
@@ -522,6 +587,7 @@ fn test_default_openssl_no_flags() {
     );
 }
 
+#[cfg(feature = "rustpki")]
 #[test]
 fn test_client_cert_auth() {
     init_log();
@@ -551,6 +617,7 @@ fn test_client_cert_auth() {
     );
 }
 
+#[cfg(feature = "rustpki")]
 #[test]
 fn test_client_no_cert_is_rejected() {
     init_log();
@@ -806,7 +873,7 @@ fn test_handshake_completes_over_a_buffering_transport() {
         let (stream, _) = listener.accept().unwrap();
         let refs: Vec<&[u8]> = certs.iter().map(|c| c.as_slice()).collect();
         let cfg = TlsServerConfig::new(&refs);
-        let ctx = TlsServerContext::new(&cfg, InsecureNoVerify, &signing_key);
+        let ctx = TlsServerContext::<InsecureIgnoreDates>::new(&cfg, &signing_key);
         let mut rb = [0u8; 16384];
         let mut wb = [0u8; 16384];
         let transport = BufferingTransport {
@@ -840,6 +907,7 @@ fn test_handshake_completes_over_a_buffering_transport() {
     assert_eq!(handshake_ok, EXPECTED_HANDSHAKE_OK);
 }
 
+#[cfg(feature = "rustpki")]
 #[test]
 fn test_client_cert_from_untrusted_ca_is_rejected() {
     init_log();
@@ -941,6 +1009,214 @@ fn test_client_sigalgs_mismatch() {
                 openssl_echo(addr, &["-sigalgs", "rsa_pss_rsae_sha256"], b"sigalgs\n");
             assert!(!ok, "handshake should fail");
             let _ = se;
+        },
+    );
+}
+
+#[cfg(feature = "rustpki")]
+#[test]
+fn test_client_cert_auth_clientauth_eku_accepted() {
+    init_log();
+    let cert = data_dir()
+        .join("client-cert-clientauth-eku.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let key = data_dir()
+        .join("client-eku-clientauth-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let ca: &'static [u8] = Box::leak(
+        load_certs_der(&data_dir().join("ca-cert.pem"))
+            .remove(0)
+            .into_boxed_slice(),
+    );
+    test_both(
+        move |c| c.with_client_auth(ca),
+        move |addr| {
+            let (ok, resp, se) = openssl_echo(addr, &["-cert", &cert, "-key", &key], b"eku\n");
+            assert!(ok, "mTLS with clientAuth EKU failed.\nstderr: {se}");
+            assert!(String::from_utf8_lossy(&resp).contains("eku"));
+        },
+    );
+}
+
+#[cfg(feature = "rustpki")]
+#[test]
+fn test_client_cert_auth_serverauth_eku_rejected() {
+    init_log();
+    let cert = data_dir()
+        .join("client-cert-serverauth-eku.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let key = data_dir()
+        .join("client-eku-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let ca: &'static [u8] = Box::leak(
+        load_certs_der(&data_dir().join("ca-cert.pem"))
+            .remove(0)
+            .into_boxed_slice(),
+    );
+    test_both_server_must_fail(
+        move |c| c.with_client_auth(ca),
+        move |addr| {
+            let (ok, _resp, se) = openssl_echo(addr, &["-cert", &cert, "-key", &key], b"eku\n");
+            const EXPECTED_CLIENT_OK: bool = false;
+            assert_eq!(ok, EXPECTED_CLIENT_OK);
+            let stderr = se.to_lowercase();
+            assert!(
+                stderr.contains("bad certificate")
+                    || stderr.contains("unknown ca")
+                    || stderr.contains("certificate expired"),
+                "expected a readable alert, got: {se}"
+            );
+        },
+    );
+}
+
+#[cfg(feature = "rustpki")]
+#[test]
+fn test_client_cert_forged_chain_is_rejected() {
+    init_log();
+    // forged-server-cert.pem is signed by client-cert.pem (not a CA), but its
+    // issuer name matches the CA, so only the root-signed-leaf rule rejects it.
+    let cert = data_dir()
+        .join("forged-server-cert.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let key = data_dir()
+        .join("forged-server-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let ca: &'static [u8] = Box::leak(
+        load_certs_der(&data_dir().join("ca-cert.pem"))
+            .remove(0)
+            .into_boxed_slice(),
+    );
+    test_both_server_must_fail(
+        move |c| c.with_client_auth(ca),
+        move |addr| {
+            let (ok, _resp, _se) = openssl_echo(addr, &["-cert", &cert, "-key", &key], b"forged\n");
+            const EXPECTED_CLIENT_OK: bool = false;
+            assert_eq!(ok, EXPECTED_CLIENT_OK);
+        },
+    );
+}
+
+#[cfg(all(feature = "rustpki", feature = "std"))]
+#[test]
+fn test_client_cert_expired_is_rejected_with_real_clock() {
+    init_log();
+    let cert = data_dir()
+        .join("expired-client-cert.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let key = data_dir()
+        .join("client-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let ca: &'static [u8] = Box::leak(
+        load_certs_der(&data_dir().join("ca-cert.pem"))
+            .remove(0)
+            .into_boxed_slice(),
+    );
+    for mode in ["blocking", "async"] {
+        let (l, a) = listen_random();
+        let s = if mode == "blocking" {
+            run_blocking_server_systemtime(l, move |c| c.with_client_auth(ca))
+        } else {
+            run_async_server_systemtime(l, move |c| c.with_client_auth(ca))
+        };
+        let (ok, _resp, se) = openssl_echo(a, &["-cert", &cert, "-key", &key], b"expired\n");
+        const EXPECTED_CLIENT_OK: bool = false;
+        assert_eq!(ok, EXPECTED_CLIENT_OK, "{mode}: {se}");
+        let stderr = se.to_lowercase();
+        assert!(
+            stderr.contains("bad certificate")
+                || stderr.contains("unknown ca")
+                || stderr.contains("certificate expired")
+                || stderr.contains("alert"),
+            "{mode}: expected a readable alert, got: {se}"
+        );
+        assert!(
+            s.join().is_err(),
+            "{mode} server accepted an expired client cert"
+        );
+    }
+}
+
+#[cfg(feature = "rustpki")]
+#[test]
+fn test_client_cert_expired_accepted_with_ignore_dates() {
+    init_log();
+    let cert = data_dir()
+        .join("expired-client-cert.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let key = data_dir()
+        .join("client-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let ca: &'static [u8] = Box::leak(
+        load_certs_der(&data_dir().join("ca-cert.pem"))
+            .remove(0)
+            .into_boxed_slice(),
+    );
+    test_both(
+        move |c| c.with_client_auth(ca),
+        move |addr| {
+            let (ok, resp, se) = openssl_echo(addr, &["-cert", &cert, "-key", &key], b"expired\n");
+            assert!(
+                ok,
+                "expired client cert should be accepted with ignore-dates.\nstderr: {se}"
+            );
+            assert!(String::from_utf8_lossy(&resp).contains("expired"));
+        },
+    );
+}
+
+#[cfg(feature = "rustpki")]
+#[test]
+fn test_client_cert_rejected_sends_encrypted_alert() {
+    init_log();
+    let cert = data_dir()
+        .join("client-cert.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let key = data_dir()
+        .join("client-key.pem")
+        .to_str()
+        .unwrap()
+        .to_string();
+    let untrusted_ca: &'static [u8] = Box::leak(
+        load_certs_der(&data_dir().join("rsa-ca-cert.pem"))
+            .remove(0)
+            .into_boxed_slice(),
+    );
+    test_both_server_must_fail(
+        move |c| c.with_client_auth(untrusted_ca),
+        move |addr| {
+            let (ok, _resp, se) = openssl_echo(addr, &["-cert", &cert, "-key", &key], b"alert\n");
+            const EXPECTED_CLIENT_OK: bool = false;
+            assert_eq!(ok, EXPECTED_CLIENT_OK);
+            let stderr = se.to_lowercase();
+            // openssl can only name the alert if it was encrypted with the
+            // keys it expects after the server's flight.
+            assert!(
+                stderr.contains("alert bad certificate"),
+                "openssl did not read the bad_certificate alert: {se}"
+            );
         },
     );
 }

@@ -1,5 +1,7 @@
 //! Server-specific TLS configuration
 
+use core::marker::PhantomData;
+
 use crate::config::PrivateKey;
 
 /// Server TLS configuration
@@ -46,9 +48,14 @@ impl<'a> TlsServerConfig<'a> {
     /// The trust anchor is required rather than optional so that mutual TLS
     /// cannot be requested without saying who is trusted.
     ///
-    /// No hostname matching or revocation checking is performed: a client
-    /// certificate carries no hostname the server can meaningfully check, and
-    /// revocation needs infrastructure an embedded server does not have.
+    /// Client authentication policy (fixed; no verifier is configurable):
+    /// the client certificate must be signed *directly* by `trust_anchor`,
+    /// following rustpki semantics: a leaf that chains through an intermediate
+    /// or through a certificate the root signed without CA:TRUE is rejected,
+    /// and no intermediates are accepted. No hostname matching or revocation
+    /// checking is performed: a client certificate carries no hostname the
+    /// server can meaningfully check, and revocation needs infrastructure an
+    /// embedded server does not have.
     #[cfg(feature = "rustpki")]
     #[must_use]
     pub fn with_client_auth(mut self, trust_anchor: &'a [u8]) -> Self {
@@ -65,33 +72,32 @@ impl<'a> TlsServerConfig<'a> {
 }
 
 /// Everything needed to accept a connection: the configuration, the key the
-/// server signs `CertificateVerify` with, and the verifier used to check a
-/// client certificate when mutual TLS is configured.
+/// server signs `CertificateVerify` with, and the clock type used for client
+/// certificate validity checking.
 ///
-/// Pass [`InsecureNoVerify`](crate::InsecureNoVerify) as the verifier when client certificate
-/// authentication is not in use, it is never consulted in that case.
-pub struct TlsServerContext<'a, Verifier> {
+/// `Clock` is the [`TlsClock`](crate::config::TlsClock) implementation the
+/// server uses when checking a client certificate's dates, mirroring how the
+/// client chooses its clock for `CertVerifier`. Use
+/// [`InsecureIgnoreDates`](crate::config::InsecureIgnoreDates) to skip date
+/// checking explicitly.
+pub struct TlsServerContext<'a, Clock> {
     pub(crate) config: &'a TlsServerConfig<'a>,
-    pub(crate) verifier: Verifier,
     pub(crate) private_key: &'a PrivateKey,
+    pub(crate) _clock: PhantomData<fn() -> Clock>,
 }
 
-impl<'a, Verifier> TlsServerContext<'a, Verifier> {
+impl<'a, Clock> TlsServerContext<'a, Clock> {
     /// Create a new server context.
     ///
     /// `private_key` must correspond to the leaf certificate in the
     /// configuration's chain; the server proves possession of it on every
     /// handshake.
     #[must_use]
-    pub fn new(
-        config: &'a TlsServerConfig<'a>,
-        verifier: Verifier,
-        private_key: &'a PrivateKey,
-    ) -> Self {
+    pub fn new(config: &'a TlsServerConfig<'a>, private_key: &'a PrivateKey) -> Self {
         Self {
             config,
-            verifier,
             private_key,
+            _clock: PhantomData,
         }
     }
 }

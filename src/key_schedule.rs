@@ -215,6 +215,8 @@ where
     shared: SharedState<CipherSuite>,
     client_state: WriteKeySchedule<CipherSuite>,
     server_state: ReadKeySchedule<CipherSuite>,
+    #[cfg(feature = "server")]
+    captured_traffic_hash: Option<CipherSuite::Hash>,
 }
 
 impl<CipherSuite> KeySchedule<CipherSuite>
@@ -232,6 +234,8 @@ where
                 state: KeyScheduleState::new(),
                 transcript_hash: CipherSuite::Hash::new(),
             },
+            #[cfg(feature = "server")]
+            captured_traffic_hash: None,
         }
     }
 
@@ -342,6 +346,48 @@ where
         self.shared.derived()
     }
 
+    #[cfg(feature = "server")]
+    pub(crate) fn capture_traffic_hash(&mut self, hash: CipherSuite::Hash) {
+        self.captured_traffic_hash = Some(hash);
+    }
+
+    #[cfg(feature = "server")]
+    pub(crate) fn captured_traffic_hash(&self) -> Option<CipherSuite::Hash> {
+        self.captured_traffic_hash.clone()
+    }
+
+    #[cfg(feature = "server")]
+    pub(crate) fn derive_server_application_write_keys(
+        &mut self,
+        transcript: CipherSuite::Hash,
+    ) -> Result<(), TlsError> {
+        let zero = HashOutput::<CipherSuite>::zeroed();
+        self.shared.initialize(zero.as_ref());
+
+        let secret = self
+            .shared
+            .derive_secret(b"s ap traffic", ContextType::transcript_hash(&transcript))?;
+        let traffic_secret = Hkdf::<CipherSuite::Hash>::from_prk(secret.as_ref())?;
+
+        self.client_state
+            .state
+            .traffic_secret
+            .replace(traffic_secret);
+        self.client_state.state.traffic_secret.expand_label(
+            b"key",
+            ContextType::None,
+            self.client_state.state.key.as_mut(),
+        )?;
+        self.client_state.state.traffic_secret.expand_label(
+            b"iv",
+            ContextType::None,
+            &mut self.client_state.state.iv,
+        )?;
+        self.client_state.state.counter = 0;
+
+        self.shared.derived()
+    }
+
     /// Replace the transcript with the synthetic `message_hash` that a
     /// HelloRetryRequest requires (RFC 8446 section 4.4.1): the running
     /// transcript is hashed, and that digest becomes the body of a synthetic
@@ -401,6 +447,11 @@ impl<CipherSuite> WriteKeySchedule<CipherSuite>
 where
     CipherSuite: TlsCipherSuite,
 {
+    #[cfg(feature = "server")]
+    pub(crate) fn has_keys(&self) -> bool {
+        matches!(self.state.traffic_secret, Secret::Initialized(_))
+    }
+
     pub(crate) fn increment_counter(&mut self) {
         self.state.increment_counter();
     }

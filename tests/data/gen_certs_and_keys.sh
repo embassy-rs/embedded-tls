@@ -84,3 +84,15 @@ openssl x509 -req -CA rsa-ca-cert.pem -CAkey rsa-ca-key.pem -in rsa1024-server-c
 # Create RSA private key, certificate signing request (CSR) and certificate for client
 openssl req -newkey rsa:2048 -keyout rsa-client-key.pem -nodes -out rsa-client-cert.csr -sha256
 openssl x509 -req -CA rsa-ca-cert.pem -CAkey rsa-ca-key.pem -in rsa-client-cert.csr -out rsa-client-cert.pem -days 10000 -CAcreateserial
+
+# Create expired and not-yet-valid client certificates signed directly by the CA
+openssl x509 -req -in client.csr -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial -out expired-client-cert.pem -not_before 20200101000000Z -not_after 20210101000000Z -sha256
+openssl x509 -req -in client.csr -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial -out future-client-cert.pem -not_before 20900101000000Z -not_after 20910101000000Z -sha256
+
+# Create client certificates carrying an Extended Key Usage extension
+openssl ecparam -name prime256v1 -genkey -noout -out client-eku-key.pem
+openssl req -new -sha256 -key client-eku-key.pem -out client-eku.csr -subj "/CN=Client EKU"
+openssl x509 -req -in client-eku.csr -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial -out client-cert-serverauth-eku.pem -days 10000 -sha256 -extfile <(printf 'extendedKeyUsage = serverAuth\n')
+openssl ecparam -name prime256v1 -genkey -noout -out client-eku-clientauth-key.pem
+openssl req -new -sha256 -key client-eku-clientauth-key.pem -out client-eku-clientauth.csr -subj "/CN=Client EKU"
+openssl x509 -req -in client-eku-clientauth.csr -CA ca-cert.pem -CAkey ca-key.pem -CAcreateserial -out client-cert-clientauth-eku.pem -days 10000 -sha256 -extfile <(printf 'extendedKeyUsage = clientAuth\n')

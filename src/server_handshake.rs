@@ -10,7 +10,7 @@
 
 use crate::TlsError;
 use crate::alert::{AlertDescription, AlertLevel};
-use crate::config::{PrivateKey, TlsCipherSuite};
+use crate::config::{PrivateKey, TlsCipherSuite, TlsClock};
 use crate::connection::decrypt_record;
 use crate::crypto::TlsHash;
 use crate::extensions::extension_data::key_share::KeyShareEntry;
@@ -542,7 +542,9 @@ impl<'a, CipherSuite: TlsCipherSuite> ServerHandshake<'a, CipherSuite> {
     /// traffic secrets are derived from it, not from the post-client-Finished
     /// transcript.
     pub(crate) fn capture_traffic_hash(&mut self, key_schedule: &mut KeySchedule<CipherSuite>) {
-        self.traffic_hash = Some(key_schedule.transcript_hash().clone());
+        let hash = key_schedule.transcript_hash().clone();
+        self.traffic_hash = Some(hash.clone());
+        key_schedule.capture_traffic_hash(hash);
     }
 
     /// Process one record of the client's response. Returns true once the
@@ -554,11 +556,15 @@ impl<'a, CipherSuite: TlsCipherSuite> ServerHandshake<'a, CipherSuite> {
     /// configured trust anchor and its CertificateVerify must prove possession
     /// of the matching private key. A client that sends neither, or only one of
     /// the two, is rejected.
-    pub(crate) fn process_client_record(
+    #[allow(clippy::extra_unused_type_parameters)]
+    pub(crate) fn process_client_record<Clock>(
         &mut self,
         key_schedule: &mut KeySchedule<CipherSuite>,
         record: ServerRecord<'_, CipherSuite>,
-    ) -> Result<bool, TlsError> {
+    ) -> Result<bool, TlsError>
+    where
+        Clock: TlsClock,
+    {
         if let ServerRecord::ChangeCipherSpec(_) = &record {
             return Ok(false);
         }
@@ -603,7 +609,7 @@ impl<'a, CipherSuite: TlsCipherSuite> ServerHandshake<'a, CipherSuite> {
                     let stored = unwrap!(client_certificate.as_ref());
                     let presented: ClientCertificate<'_> = stored.try_into()?;
 
-                    verify_client_certificate::<CipherSuite, crate::config::InsecureIgnoreDates>(
+                    verify_client_certificate::<CipherSuite, Clock>(
                         trust_anchor,
                         &transcript,
                         presented,

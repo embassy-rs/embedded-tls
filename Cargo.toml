@@ -37,6 +37,8 @@ defmt = { version = "1.0.1", optional = true }
 embassy-crypto-rustcrypto = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", rev = "822a76ea91f2c0885c6eb0c65fe91181e31133e1", features = ["all"] }
 embassy-crypto-rand = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", rev = "822a76ea91f2c0885c6eb0c65fe91181e31133e1" }
 env_logger = "0.11"
+embedded-io = { version = "0.7", features = ["std"] }
+embedded-io-adapters = { version = "0.7", features = ["std", "tokio-1"] }
 tokio = { version = "1", features = ["full"] }
 mio = { version = "0.8.3", features = ["os-poll", "net"] }
 rustls = "0.21.6"

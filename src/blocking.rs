@@ -126,12 +126,12 @@ where
     /// On failure the peer is told why with a TLS alert before the error is
     /// returned, so interop problems are diagnosable from the client side.
     #[cfg(feature = "server")]
-    pub fn open_server<Verifier>(
+    pub fn open_server<Clock>(
         &mut self,
-        context: crate::server_config::TlsServerContext<'_, Verifier>,
+        context: crate::server_config::TlsServerContext<'_, Clock>,
     ) -> Result<(), TlsError>
     where
-        Verifier: TlsVerifier<CipherSuite>,
+        Clock: crate::config::TlsClock,
     {
         let result = self.open_server_handshake(context);
 
@@ -153,12 +153,19 @@ where
         level: crate::alert::AlertLevel,
         description: crate::alert::AlertDescription,
     ) -> Result<(), TlsError> {
+        if let Some(hash) = self.key_schedule.captured_traffic_hash() {
+            let _ = self.key_schedule.derive_server_application_write_keys(hash);
+        }
         let (write_key_schedule, read_key_schedule) = self.key_schedule.as_split();
+        let encrypted = write_key_schedule.has_keys();
         let tx = self.record_write_buf.write_record(
-            &ClientRecord::Alert(crate::alert::Alert { level, description }, false),
+            &ClientRecord::Alert(crate::alert::Alert { level, description }, encrypted),
             write_key_schedule,
             Some(read_key_schedule),
         )?;
+        if encrypted {
+            self.key_schedule.write_state().increment_counter();
+        }
         self.delegate
             .write_all(tx)
             .map_err(|e| TlsError::Io(e.kind()))?;
@@ -167,19 +174,19 @@ where
     }
 
     #[cfg(feature = "server")]
-    fn open_server_handshake<Verifier>(
+    fn open_server_handshake<Clock>(
         &mut self,
-        context: crate::server_config::TlsServerContext<'_, Verifier>,
+        context: crate::server_config::TlsServerContext<'_, Clock>,
     ) -> Result<(), TlsError>
     where
-        Verifier: TlsVerifier<CipherSuite>,
+        Clock: crate::config::TlsClock,
     {
         use crate::server_handshake::{CHANGE_CIPHER_SPEC, ServerHandshake};
 
         let crate::server_config::TlsServerContext {
             config,
-            verifier: _verifier,
             private_key,
+            ..
         } = context;
         let mut handshake: ServerHandshake<'_, CipherSuite> = ServerHandshake::new(config);
 
@@ -254,7 +261,7 @@ where
             let record = self
                 .record_reader
                 .read_blocking(&mut self.delegate, self.key_schedule.read_state())?;
-            if handshake.process_client_record(&mut self.key_schedule, record)? {
+            if handshake.process_client_record::<Clock>(&mut self.key_schedule, record)? {
                 break;
             }
         }
