@@ -143,25 +143,27 @@ impl SignatureScheme {
 
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct SignatureAlgorithms<const N: usize> {
+pub struct SignatureAlgorithms<'a, const N: usize> {
+    /// Populated on the encode side (from the config); empty on the parse side.
     pub supported_signature_algorithms: Vec<SignatureScheme, N>,
+    /// Populated on the parse side (borrowed from the input); `&[]` on the
+    /// encode side. Source of truth for what the peer offered.
+    pub raw: &'a [u8],
 }
 
-impl<const N: usize> SignatureAlgorithms<N> {
-    pub fn parse(buf: &mut ParseBuffer) -> Result<Self, ParseError> {
+impl<'a, const N: usize> SignatureAlgorithms<'a, N> {
+    pub fn parse(buf: &mut ParseBuffer<'a>) -> Result<Self, ParseError> {
         let data_length = buf.read_u16()? as usize;
         let mut data = buf.slice(data_length)?;
-        let mut supported_signature_algorithms = Vec::new();
+        let raw = data.as_slice();
+        // Validate even length and consume the list, but do not copy it into a
+        // bounded Vec: the raw slice is the source of truth.
         while !data.is_empty() {
-            let raw = data.read_u16()?;
-            if let Some(scheme) = SignatureScheme::of(raw) {
-                supported_signature_algorithms
-                    .push(scheme)
-                    .map_err(|_| ParseError::InsufficientSpace)?;
-            }
+            let _ = data.read_u16()?;
         }
         Ok(Self {
-            supported_signature_algorithms,
+            supported_signature_algorithms: Vec::new(),
+            raw,
         })
     }
 
@@ -186,13 +188,9 @@ mod skip_unknown_tests {
         // length: 3 u16s = 6 bytes
         let bytes = [0x00, 0x06, 0xFA, 0xFA, 0x04, 0x01, 0xAB, 0xCD];
         let mut buf = ParseBuffer::new(&bytes);
-        let parsed = SignatureAlgorithms::<8>::parse(&mut buf).expect("parses");
-        const EXPECTED: usize = 1;
-        assert_eq!(parsed.supported_signature_algorithms.len(), EXPECTED);
-        assert_eq!(
-            parsed.supported_signature_algorithms[0],
-            SignatureScheme::RsaPkcs1Sha256
-        );
+        let parsed = SignatureAlgorithms::<'_, 8>::parse(&mut buf).expect("parses");
+        const EXPECTED: usize = 6;
+        assert_eq!(parsed.raw.len(), EXPECTED);
     }
 
     #[test]
@@ -200,7 +198,7 @@ mod skip_unknown_tests {
         // length says 3 bytes (odd), trailing partial u16
         let bytes = [0x00, 0x03, 0x04, 0x01, 0xFF];
         let mut buf = ParseBuffer::new(&bytes);
-        let result = SignatureAlgorithms::<8>::parse(&mut buf);
+        let result = SignatureAlgorithms::<'_, 8>::parse(&mut buf);
         assert!(result.is_err());
     }
 }

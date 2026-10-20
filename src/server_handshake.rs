@@ -40,6 +40,17 @@ pub(crate) const CHANGE_CIPHER_SPEC: [u8; 6] = [0x14, 0x03, 0x03, 0x00, 0x01, 0x
 /// Key exchange groups this build can compute, in preference order.
 const SERVER_GROUPS: &[NamedGroup] = &[NamedGroup::X25519, NamedGroup::Secp256r1];
 
+/// (code point, bit) pairs for the signature schemes this crate can verify.
+/// Single source of truth shared by the client-hello mask and validation.
+const SIGALG_BITS: &[(u16, u8)] = &[
+    (0x0403, 1 << 0),
+    (0x0503, 1 << 1),
+    (0x0807, 1 << 2),
+    (0x0804, 1 << 3),
+    (0x0805, 1 << 4),
+    (0x0806, 1 << 5),
+];
+
 /// Capacity for the client's certificate chain. Two kilobytes holds a typical
 /// P-256 leaf plus one intermediate; a larger chain is rejected with
 /// `OutOfMemory` rather than silently truncated.
@@ -94,6 +105,8 @@ pub(crate) struct ServerHandshake<'a, CipherSuite: TlsCipherSuite> {
     shared_secret: heapless::Vec<u8, 32>,
     group: NamedGroup,
     selected_alpn: Option<&'a [u8]>,
+    client_hello_fingerprint: Option<<CipherSuite::Hash as TlsHash>::Output>,
+    client_sigalg_mask: u8,
     traffic_hash: Option<CipherSuite::Hash>,
     /// Owned copy of the client's certificate. The record buffer is reused
     /// between reads, so it cannot be borrowed until the CertificateVerify.
@@ -119,6 +132,8 @@ impl<'a, CipherSuite: TlsCipherSuite> ServerHandshake<'a, CipherSuite> {
             shared_secret: heapless::Vec::new(),
             group: NamedGroup::Secp256r1,
             selected_alpn: None,
+            client_hello_fingerprint: None,
+            client_sigalg_mask: 0,
             traffic_hash: None,
             #[cfg(feature = "rustpki")]
             client_certificate: None,
@@ -130,6 +145,91 @@ impl<'a, CipherSuite: TlsCipherSuite> ServerHandshake<'a, CipherSuite> {
 
     pub(crate) fn did_hrr(&self) -> bool {
         self.did_hrr
+    }
+
+    fn client_sigalg_mask(
+        ch: &crate::handshake::client_hello::ParsedClientHello<'_>,
+    ) -> Result<u8, TlsError> {
+        match ch.signature_algorithms {
+            None | Some([]) => {
+                return Err(TlsError::AbortHandshake(
+                    AlertLevel::Fatal,
+                    AlertDescription::MissingExtension,
+                ));
+            }
+            _ => {}
+        }
+        let mut mask = 0u8;
+        for &(code, bit) in SIGALG_BITS {
+            if ch.offers_signature_scheme(code) {
+                mask |= bit;
+            }
+        }
+        Ok(mask)
+    }
+
+    /// Compact, fixed-size fingerprint of the ClientHello fields that must be
+    /// identical between CH1 and CH2 (RFC 8446 4.1.2). Variable-length fields
+    /// are hashed with a length prefix so bytes cannot shift between fields.
+    fn client_hello_fingerprint(
+        ch: &crate::handshake::client_hello::ParsedClientHello<'_>,
+    ) -> <CipherSuite::Hash as TlsHash>::Output {
+        let mut hash = CipherSuite::Hash::new();
+        hash.update(&ch.random);
+
+        hash.update(&(ch.session_id.len() as u16).to_be_bytes());
+        hash.update(ch.session_id);
+
+        hash.update(&(ch.cipher_suites.len() as u16).to_be_bytes());
+        hash.update(ch.cipher_suites);
+
+        hash.update(&(ch.supported_groups.len() as u16).to_be_bytes());
+        for group in &ch.supported_groups {
+            hash.update(&group.as_u16().to_be_bytes());
+        }
+
+        hash.update(&(ch.alpn_protocols.len() as u16).to_be_bytes());
+        for proto in &ch.alpn_protocols {
+            hash.update(&(proto.len() as u16).to_be_bytes());
+            hash.update(proto);
+        }
+
+        match ch.signature_algorithms {
+            Some(raw) => {
+                hash.update(&(raw.len() as u16).to_be_bytes());
+                hash.update(raw);
+            }
+            None => {
+                hash.update(&0u16.to_be_bytes());
+            }
+        }
+
+        hash.finalize()
+    }
+
+    pub(crate) fn validate_server_signature_scheme(
+        &self,
+        private_key: &crate::config::PrivateKey,
+    ) -> Result<(), TlsError> {
+        let Some(bit) = SIGALG_BITS.iter().find_map(|&(code, bit)| {
+            if private_key.signature_scheme().as_u16() == code {
+                Some(bit)
+            } else {
+                None
+            }
+        }) else {
+            return Err(TlsError::AbortHandshake(
+                AlertLevel::Fatal,
+                AlertDescription::HandshakeFailure,
+            ));
+        };
+        if self.client_sigalg_mask & bit == 0 {
+            return Err(TlsError::AbortHandshake(
+                AlertLevel::Fatal,
+                AlertDescription::HandshakeFailure,
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn needs_hello_retry(&self) -> bool {
@@ -179,7 +279,17 @@ impl<'a, CipherSuite: TlsCipherSuite> ServerHandshake<'a, CipherSuite> {
                     break;
                 }
             }
+            // RFC 7301 3.2: if the client offered ALPN, the server has ALPN
+            // configured, and nothing matches, the handshake must fail.
+            if !ch.alpn_protocols.is_empty() && self.selected_alpn.is_none() {
+                return Err(TlsError::AbortHandshake(
+                    AlertLevel::Fatal,
+                    AlertDescription::NoApplicationProtocol,
+                ));
+            }
         }
+
+        self.client_sigalg_mask = Self::client_sigalg_mask(ch)?;
 
         // Prefer X25519, then P-256.
         self.key_share = take_key_share(ch, NamedGroup::X25519);
@@ -193,6 +303,8 @@ impl<'a, CipherSuite: TlsCipherSuite> ServerHandshake<'a, CipherSuite> {
             .iter()
             .find(|group| ch.supported_groups.contains(group))
             .copied();
+
+        self.client_hello_fingerprint = Some(Self::client_hello_fingerprint(ch));
 
         #[cfg(feature = "defmt")]
         defmt::info!(
@@ -239,6 +351,46 @@ impl<'a, CipherSuite: TlsCipherSuite> ServerHandshake<'a, CipherSuite> {
             ServerRecord::ChangeCipherSpec(_) => Ok(false),
             ServerRecord::Handshake(ServerHandshakeMessage::ClientHello(ch)) => {
                 let retry_group = self.retry_group.ok_or(TlsError::InvalidKeyShare)?;
+
+                // CH2's key_share must contain exactly the group named in the HRR.
+                if ch.key_shares.len() != 1 || ch.key_shares[0].group != retry_group {
+                    return Err(TlsError::AbortHandshake(
+                        AlertLevel::Fatal,
+                        AlertDescription::IllegalParameter,
+                    ));
+                }
+
+                // Server's choices from CH1 must still be valid for CH2.
+                if !ch.offers(CipherSuite::CODE_POINT) {
+                    return Err(TlsError::AbortHandshake(
+                        AlertLevel::Fatal,
+                        AlertDescription::HandshakeFailure,
+                    ));
+                }
+                if let Some(selected) = self.selected_alpn {
+                    if !ch.alpn_protocols.contains(&selected) {
+                        return Err(TlsError::AbortHandshake(
+                            AlertLevel::Fatal,
+                            AlertDescription::IllegalParameter,
+                        ));
+                    }
+                }
+                // missing_extension handled during CH1; keep CH2 consistent.
+                self.client_sigalg_mask = Self::client_sigalg_mask(ch)?;
+
+                // Invariant fields must be unchanged (RFC 8446 4.1.2).
+                let finalized = Self::client_hello_fingerprint(ch);
+                let fingerprint_mismatch = match self.client_hello_fingerprint {
+                    Some(stored) => stored.as_ref() != finalized.as_ref(),
+                    None => true,
+                };
+                if fingerprint_mismatch {
+                    return Err(TlsError::AbortHandshake(
+                        AlertLevel::Fatal,
+                        AlertDescription::IllegalParameter,
+                    ));
+                }
+
                 self.key_share = take_key_share(ch, retry_group);
                 if self.key_share.is_none() {
                     return Err(TlsError::InvalidKeyShare);
@@ -331,13 +483,11 @@ impl<'a, CipherSuite: TlsCipherSuite> ServerHandshake<'a, CipherSuite> {
                 })?
             }
             FlightRecord::CertificateRequest => {
+                let schemes = crate::server::verifiable_client_cert_schemes();
                 let (wks, rks) = key_schedule.as_split();
-                tx_buf.write_handshake_record(
-                    true,
-                    wks,
-                    rks.transcript_hash(),
-                    encode_certificate_request,
-                )?
+                tx_buf.write_handshake_record(true, wks, rks.transcript_hash(), |buf| {
+                    encode_certificate_request(buf, schemes)
+                })?
             }
             FlightRecord::Certificate => {
                 let cert_chain = self.config.cert_chain;
@@ -563,5 +713,227 @@ pub(crate) fn alert_for(error: &TlsError) -> Option<(AlertLevel, AlertDescriptio
             Some((AlertLevel::Fatal, AlertDescription::IllegalParameter))
         }
         _ => Some((AlertLevel::Fatal, AlertDescription::HandshakeFailure)),
+    }
+}
+
+#[cfg(all(test, feature = "server"))]
+mod hrr_validation_tests {
+    use super::*;
+    use crate::config::Aes128GcmSha256;
+    use crate::handshake::client_hello::ParsedClientHello;
+    use crate::parse_buffer::ParseBuffer;
+    use crate::server_config::TlsServerConfig;
+
+    fn build_client_hello(
+        random: [u8; 32],
+        cipher_suites: &[u16],
+        alpn: &[&[u8]],
+        key_share_groups: &[NamedGroup],
+        supported_groups: &[NamedGroup],
+        sigalgs: &[u16],
+    ) -> std::vec::Vec<u8> {
+        let mut out = std::vec::Vec::new();
+        out.extend_from_slice(&crate::handshake::LEGACY_VERSION.to_be_bytes());
+        out.extend_from_slice(&random);
+        out.push(0); // session id
+        out.extend_from_slice(&((cipher_suites.len() * 2) as u16).to_be_bytes());
+        for suite in cipher_suites {
+            out.extend_from_slice(&suite.to_be_bytes());
+        }
+        out.extend_from_slice(&[0x01, 0x00]); // compression
+
+        let mut extensions = std::vec::Vec::new();
+        // supported_versions
+        extensions.extend_from_slice(&0x002bu16.to_be_bytes());
+        extensions.extend_from_slice(&0x0003u16.to_be_bytes());
+        extensions.push(0x02);
+        extensions.extend_from_slice(&[0x03, 0x04]);
+
+        // supported_groups
+        let mut sg = std::vec::Vec::new();
+        for g in supported_groups {
+            sg.extend_from_slice(&g.as_u16().to_be_bytes());
+        }
+        extensions.extend_from_slice(&0x000au16.to_be_bytes());
+        extensions.extend_from_slice(&((sg.len() + 2) as u16).to_be_bytes());
+        extensions.extend_from_slice(&(sg.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(&sg);
+
+        // key_share
+        let mut shares = std::vec::Vec::new();
+        for group in key_share_groups {
+            shares.extend_from_slice(&group.as_u16().to_be_bytes());
+            shares.extend_from_slice(&0x0004u16.to_be_bytes());
+            shares.extend_from_slice(&[0xAA; 4]);
+        }
+        extensions.extend_from_slice(&0x0033u16.to_be_bytes());
+        extensions.extend_from_slice(&((shares.len() + 2) as u16).to_be_bytes());
+        extensions.extend_from_slice(&(shares.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(&shares);
+
+        // ALPN
+        if !alpn.is_empty() {
+            let mut proto_bytes = std::vec::Vec::new();
+            for p in alpn {
+                proto_bytes.push(p.len() as u8);
+                proto_bytes.extend_from_slice(p);
+            }
+            let mut alpn_ext = std::vec::Vec::new();
+            alpn_ext.extend_from_slice(&(proto_bytes.len() as u16).to_be_bytes());
+            alpn_ext.extend_from_slice(&proto_bytes);
+            extensions.extend_from_slice(&0x0010u16.to_be_bytes());
+            extensions.extend_from_slice(&((alpn_ext.len()) as u16).to_be_bytes());
+            extensions.extend_from_slice(&alpn_ext);
+        }
+
+        // signature_algorithms
+        if !sigalgs.is_empty() {
+            let mut sa = std::vec::Vec::new();
+            for s in sigalgs {
+                sa.extend_from_slice(&s.to_be_bytes());
+            }
+            extensions.extend_from_slice(&0x000du16.to_be_bytes());
+            extensions.extend_from_slice(&((sa.len() + 2) as u16).to_be_bytes());
+            extensions.extend_from_slice(&(sa.len() as u16).to_be_bytes());
+            extensions.extend_from_slice(&sa);
+        }
+
+        out.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        out.extend_from_slice(&extensions);
+        out
+    }
+
+    fn parse_ch(bytes: &[u8]) -> ParsedClientHello<'_> {
+        let mut buf = ParseBuffer::new(bytes);
+        ParsedClientHello::parse(&mut buf).unwrap()
+    }
+
+    #[test]
+    fn hrr_unchanged_ch2_succeeds() {
+        let random = [7u8; 32];
+        let suites = [0x1301u16];
+        let ch1 = build_client_hello(
+            random,
+            &suites,
+            &[b"h2"],
+            &[NamedGroup::Secp384r1],
+            &[NamedGroup::Secp384r1, NamedGroup::Secp256r1],
+            &[0x0403],
+        );
+        let ch2 = build_client_hello(
+            random,
+            &suites,
+            &[b"h2"],
+            &[NamedGroup::Secp256r1],
+            &[NamedGroup::Secp384r1, NamedGroup::Secp256r1],
+            &[0x0403],
+        );
+
+        let refs: &[&[u8]] = &[];
+        let mut cfg = TlsServerConfig::new(refs);
+        cfg = cfg.with_alpn(&[b"h2"]);
+        let mut hs = ServerHandshake::<Aes128GcmSha256>::new(&cfg);
+
+        let r1 = ServerRecord::Handshake(ServerHandshakeMessage::ClientHello(parse_ch(&ch1)));
+        hs.absorb_client_hello(&r1).unwrap();
+        assert!(hs.needs_hello_retry());
+
+        let r2 = ServerRecord::Handshake(ServerHandshakeMessage::ClientHello(parse_ch(&ch2)));
+        assert!(hs.absorb_hello_retry_response(&r2).unwrap());
+    }
+
+    #[test]
+    fn hrr_changed_cipher_suites_rejected() {
+        let random = [7u8; 32];
+        let ch1 = build_client_hello(
+            random,
+            &[0x1301],
+            &[b"h2"],
+            &[NamedGroup::Secp384r1],
+            &[NamedGroup::Secp384r1, NamedGroup::Secp256r1],
+            &[0x0403],
+        );
+        let ch2 = build_client_hello(
+            random,
+            &[0x1302],
+            &[b"h2"],
+            &[NamedGroup::Secp256r1],
+            &[NamedGroup::Secp384r1, NamedGroup::Secp256r1],
+            &[0x0403],
+        );
+
+        let refs: &[&[u8]] = &[];
+        let mut cfg = TlsServerConfig::new(refs);
+        cfg = cfg.with_alpn(&[b"h2"]);
+        let mut hs = ServerHandshake::<Aes128GcmSha256>::new(&cfg);
+
+        let r1 = ServerRecord::Handshake(ServerHandshakeMessage::ClientHello(parse_ch(&ch1)));
+        hs.absorb_client_hello(&r1).unwrap();
+
+        let r2 = ServerRecord::Handshake(ServerHandshakeMessage::ClientHello(parse_ch(&ch2)));
+        assert!(hs.absorb_hello_retry_response(&r2).is_err());
+    }
+
+    #[test]
+    fn hrr_changed_random_rejected() {
+        let ch1 = build_client_hello(
+            [7u8; 32],
+            &[0x1301],
+            &[b"h2"],
+            &[NamedGroup::Secp384r1],
+            &[NamedGroup::Secp384r1, NamedGroup::Secp256r1],
+            &[0x0403],
+        );
+        let ch2 = build_client_hello(
+            [8u8; 32],
+            &[0x1301],
+            &[b"h2"],
+            &[NamedGroup::Secp256r1],
+            &[NamedGroup::Secp384r1, NamedGroup::Secp256r1],
+            &[0x0403],
+        );
+
+        let refs: &[&[u8]] = &[];
+        let mut cfg = TlsServerConfig::new(refs);
+        cfg = cfg.with_alpn(&[b"h2"]);
+        let mut hs = ServerHandshake::<Aes128GcmSha256>::new(&cfg);
+
+        let r1 = ServerRecord::Handshake(ServerHandshakeMessage::ClientHello(parse_ch(&ch1)));
+        hs.absorb_client_hello(&r1).unwrap();
+
+        let r2 = ServerRecord::Handshake(ServerHandshakeMessage::ClientHello(parse_ch(&ch2)));
+        assert!(hs.absorb_hello_retry_response(&r2).is_err());
+    }
+
+    #[test]
+    fn hrr_changed_alpn_rejected() {
+        let random = [7u8; 32];
+        let ch1 = build_client_hello(
+            random,
+            &[0x1301],
+            &[b"h2"],
+            &[NamedGroup::Secp384r1],
+            &[NamedGroup::Secp384r1, NamedGroup::Secp256r1],
+            &[0x0403],
+        );
+        let ch2 = build_client_hello(
+            random,
+            &[0x1301],
+            &[b"http/1.1"],
+            &[NamedGroup::Secp256r1],
+            &[NamedGroup::Secp384r1, NamedGroup::Secp256r1],
+            &[0x0403],
+        );
+
+        let refs: &[&[u8]] = &[];
+        let mut cfg = TlsServerConfig::new(refs);
+        cfg = cfg.with_alpn(&[b"h2"]);
+        let mut hs = ServerHandshake::<Aes128GcmSha256>::new(&cfg);
+
+        let r1 = ServerRecord::Handshake(ServerHandshakeMessage::ClientHello(parse_ch(&ch1)));
+        hs.absorb_client_hello(&r1).unwrap();
+
+        let r2 = ServerRecord::Handshake(ServerHandshakeMessage::ClientHello(parse_ch(&ch2)));
+        assert!(hs.absorb_hello_retry_response(&r2).is_err());
     }
 }

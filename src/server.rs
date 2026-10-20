@@ -158,7 +158,14 @@ pub fn encode_encrypted_extensions(
 }
 
 /// Encode a `CertificateRequest` handshake message.
-pub fn encode_certificate_request(buf: &mut CryptoBuffer<'_>) -> Result<(), TlsError> {
+pub fn encode_certificate_request(
+    buf: &mut CryptoBuffer<'_>,
+    signature_schemes: &[u16],
+) -> Result<(), TlsError> {
+    if signature_schemes.is_empty() {
+        return Err(TlsError::InvalidHandshake);
+    }
+
     buf.push(HandshakeType::CertificateRequest as u8)
         .map_err(|_| TlsError::EncodeError)?;
 
@@ -173,17 +180,33 @@ pub fn encode_certificate_request(buf: &mut CryptoBuffer<'_>) -> Result<(), TlsE
             buf.with_u16_length(|buf| {
                 // SignatureSchemeList
                 buf.with_u16_length(|buf| {
-                    // ecdsa_secp256r1_sha256 = 0x0403
-                    buf.push_u16(0x0403)?;
-                    // ecdsa_secp384r1_sha384 = 0x0503
-                    buf.push_u16(0x0503)?;
-                    // rsa_pss_rsae_sha256 = 0x0804
-                    buf.push_u16(0x0804)?;
+                    for &scheme in signature_schemes {
+                        buf.push_u16(scheme)?;
+                    }
                     Ok(())
                 })
             })
         })
     })
+}
+
+/// Signature schemes this build can verify for a client CertificateVerify.
+/// Must match `crate::pki::verify_signature`'s cfg-gated arms exactly.
+pub(crate) fn verifiable_client_cert_schemes() -> &'static [u16] {
+    &[
+        #[cfg(feature = "p256")]
+        0x0403u16,
+        #[cfg(feature = "p384")]
+        0x0503u16,
+        #[cfg(feature = "ed25519")]
+        0x0807u16,
+        #[cfg(feature = "rsa")]
+        0x0804u16,
+        #[cfg(feature = "rsa")]
+        0x0805u16,
+        #[cfg(feature = "rsa")]
+        0x0806u16,
+    ]
 }
 
 /// Encode a Certificate handshake message with the given DER cert chain.
@@ -364,5 +387,50 @@ mod ecdh_smoke {
         assert_eq!(group, NamedGroup::X25519);
         assert_eq!(pk.len(), 32, "server public key length");
         assert_eq!(secret.len(), 32, "shared secret length");
+    }
+}
+
+#[cfg(test)]
+mod server_unit_tests {
+    use super::*;
+
+    #[test]
+    fn verifiable_client_cert_schemes_match_verify_signature() {
+        let expected: &[u16] = &[
+            #[cfg(feature = "p256")]
+            0x0403u16,
+            #[cfg(feature = "p384")]
+            0x0503u16,
+            #[cfg(feature = "ed25519")]
+            0x0807u16,
+            #[cfg(feature = "rsa")]
+            0x0804u16,
+            #[cfg(feature = "rsa")]
+            0x0805u16,
+            #[cfg(feature = "rsa")]
+            0x0806u16,
+        ];
+        assert_eq!(verifiable_client_cert_schemes(), expected);
+    }
+
+    #[test]
+    fn encode_certificate_request_contains_exact_scheme_list() {
+        let schemes = verifiable_client_cert_schemes();
+        let mut backing = [0u8; 256];
+        let mut buf = crate::buffer::CryptoBuffer::wrap(&mut backing);
+        encode_certificate_request(&mut buf, schemes).unwrap();
+        let encoded = &buf.as_ref()[..buf.len()];
+        // Every scheme must appear in order.
+        for &scheme in schemes {
+            assert!(
+                encoded
+                    .windows(2)
+                    .any(|w| u16::from_be_bytes([w[0], w[1]]) == scheme)
+            );
+        }
+        // Empty list still errors.
+        let mut backing2 = [0u8; 64];
+        let mut buf2 = crate::buffer::CryptoBuffer::wrap(&mut backing2);
+        assert!(encode_certificate_request(&mut buf2, &[]).is_err());
     }
 }

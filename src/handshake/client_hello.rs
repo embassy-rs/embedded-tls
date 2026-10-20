@@ -111,6 +111,7 @@ where
             if !self.config.signature_schemes.is_empty() {
                 ClientHelloExtension::SignatureAlgorithms(SignatureAlgorithms {
                     supported_signature_algorithms: self.config.signature_schemes.clone(),
+                    raw: &[],
                 })
                 .encode(buf)?;
             }
@@ -490,6 +491,7 @@ mod tests {
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[cfg(feature = "server")]
 pub struct ParsedClientHello<'a> {
+    pub random: [u8; 32],
     pub session_id: &'a [u8],
     /// Cipher suite code points the client offered, so the server can check
     /// its own suite is among them before naming it in the ServerHello.
@@ -499,6 +501,8 @@ pub struct ParsedClientHello<'a> {
     pub supported_groups: Vec<NamedGroup, 16>,
     pub key_shares: Vec<KeyShareEntry<'a>, 4>,
     pub alpn_protocols: Vec<&'a [u8], MAX_ALPN_PROTOCOLS>,
+    /// Raw signature_algorithms list from the extension, if present.
+    pub signature_algorithms: Option<&'a [u8]>,
 }
 
 #[cfg(feature = "server")]
@@ -509,8 +513,9 @@ impl<'a> ParsedClientHello<'a> {
             return Err(TlsError::InvalidHandshake);
         }
 
-        // Random (skip, not needed by server currently)
-        buf.slice(32).map_err(|_| TlsError::InvalidHandshake)?;
+        let random_buf = buf.slice(32).map_err(|_| TlsError::InvalidHandshake)?;
+        let mut random = [0u8; 32];
+        random.copy_from_slice(random_buf.as_slice());
 
         // Session ID
         let session_id_len = buf
@@ -545,6 +550,7 @@ impl<'a> ParsedClientHello<'a> {
         let mut key_shares = Vec::new();
         let mut supported_groups = Vec::new();
         let mut alpn_protocols = Vec::new();
+        let mut signature_algorithms: Option<&'a [u8]> = None;
         let mut has_tls13 = false;
 
         for ext in &extensions {
@@ -565,7 +571,9 @@ impl<'a> ParsedClientHello<'a> {
                 }
                 ClientHelloExtension::SupportedGroups(sg) => {
                     for group in &sg.supported_groups {
-                        let _ = supported_groups.push(*group);
+                        supported_groups
+                            .push(*group)
+                            .map_err(|_| TlsError::InsufficientSpace)?;
                     }
                 }
                 ClientHelloExtension::SupportedVersions(sv) => {
@@ -582,6 +590,9 @@ impl<'a> ParsedClientHello<'a> {
                             .map_err(|_| TlsError::InsufficientSpace)?;
                     }
                 }
+                ClientHelloExtension::SignatureAlgorithms(sa) => {
+                    signature_algorithms = Some(sa.raw);
+                }
                 _ => {}
             }
         }
@@ -591,11 +602,13 @@ impl<'a> ParsedClientHello<'a> {
         }
 
         Ok(Self {
+            random,
             session_id,
             cipher_suites,
             supported_groups,
             key_shares,
             alpn_protocols,
+            signature_algorithms,
         })
     }
 }
@@ -607,6 +620,16 @@ impl<'a> ParsedClientHello<'a> {
         self.cipher_suites
             .chunks_exact(2)
             .any(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]) == code_point)
+    }
+
+    /// Whether the client offered `scheme` among its signature_algorithms.
+    pub fn offers_signature_scheme(&self, scheme: u16) -> bool {
+        match self.signature_algorithms {
+            Some(raw) => raw
+                .chunks_exact(2)
+                .any(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]) == scheme),
+            None => false,
+        }
     }
 }
 
@@ -757,5 +780,43 @@ mod server_tests {
 
         const EXPECTED_SUITE: u16 = 0x1301;
         assert!(hello.offers(EXPECTED_SUITE));
+    }
+
+    #[test]
+    fn then_thirty_signature_schemes_retain_last() {
+        // 30 schemes, server's (0x0403) last: must not be truncated.
+        let mut out = std::vec::Vec::new();
+        out.extend_from_slice(&LEGACY_VERSION.to_be_bytes());
+        out.extend_from_slice(&[0u8; 32]); // random
+        out.push(0); // session id
+        out.extend_from_slice(&[0x00, 0x02]); // cipher suites
+        out.extend_from_slice(&0x1301u16.to_be_bytes());
+        out.extend_from_slice(&[0x01, 0x00]); // compression
+
+        let mut extensions = std::vec::Vec::new();
+        // supported_versions
+        extensions.extend_from_slice(&0x002bu16.to_be_bytes());
+        extensions.extend_from_slice(&0x0003u16.to_be_bytes());
+        extensions.push(0x02);
+        extensions.extend_from_slice(&[0x03, 0x04]);
+
+        // signature_algorithms: 30 entries, last is 0x0403
+        let mut sa = std::vec::Vec::new();
+        for _ in 0..29 {
+            sa.extend_from_slice(&0x0807u16.to_be_bytes()); // ed25519 (unknown? known but repeated)
+        }
+        sa.extend_from_slice(&0x0403u16.to_be_bytes());
+        extensions.extend_from_slice(&0x000du16.to_be_bytes());
+        extensions.extend_from_slice(&((sa.len() + 2) as u16).to_be_bytes());
+        extensions.extend_from_slice(&(sa.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(&sa);
+
+        out.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        out.extend_from_slice(&extensions);
+
+        let mut buf = ParseBuffer::new(&out);
+        let hello = ParsedClientHello::parse(&mut buf).expect("parses");
+        assert!(hello.offers_signature_scheme(0x0403));
+        assert_eq!(hello.signature_algorithms.unwrap().len(), 60);
     }
 }

@@ -640,13 +640,16 @@ fn test_multiple_groups() {
 #[test]
 fn test_alpn_mismatch() {
     init_log();
-    test_both(
+    test_both_server_must_fail(
         |c| c.with_alpn(&[b"mqtt"]),
         |addr| {
-            // Client offers grpc, server only has mqtt, no match, but handshake succeeds
-            let (ok, resp, _se) = openssl_echo(addr, &["-alpn", "grpc"], b"mismatch\n");
-            assert!(ok, "handshake should still succeed");
-            assert!(String::from_utf8_lossy(&resp).contains("mismatch"));
+            // Client offers grpc, server only has mqtt, no match -> handshake fails
+            let (ok, _resp, se) = openssl_echo(addr, &["-alpn", "grpc"], b"mismatch\n");
+            assert!(!ok, "handshake should fail");
+            assert!(
+                se.contains("no application protocol") || se.contains("NO_APPLICATION_PROTOCOL"),
+                "expected no_application_protocol alert, got: {se}"
+            );
         },
     );
 }
@@ -913,18 +916,31 @@ fn test_hrr_is_not_sent_for_an_unoffered_group() {
 #[test]
 fn test_alpn_does_not_match_on_a_truncated_prefix() {
     init_log();
-    // The client's 40-byte protocol shares its first 32 bytes with the
-    // server's. Comparing truncated copies calls that a match, so the server
-    // echoes a protocol the client never offered and the client aborts.
-    // Correctly, there is no match, and a no-match handshake still succeeds.
     const SERVER_PROTO: &[u8] = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let client_proto = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaabbbbbbbb";
-    test_both(
+    test_both_server_must_fail(
         |c| c.with_alpn(&[SERVER_PROTO]),
         move |addr| {
-            let (ok, resp, se) = openssl_echo(addr, &["-alpn", client_proto], b"prefix\n");
-            assert!(ok, "server matched a truncated ALPN prefix: {se}");
-            assert!(String::from_utf8_lossy(&resp).contains("prefix"));
+            let (ok, _resp, se) = openssl_echo(addr, &["-alpn", client_proto], b"prefix\n");
+            assert!(!ok, "handshake should fail on ALPN mismatch: {se}");
+            assert!(
+                se.contains("no application protocol") || se.contains("NO_APPLICATION_PROTOCOL"),
+                "expected no_application_protocol alert, got: {se}"
+            );
+        },
+    );
+}
+
+#[test]
+fn test_client_sigalgs_mismatch() {
+    init_log();
+    test_both_server_must_fail(
+        |c| c,
+        |addr| {
+            let (ok, _resp, se) =
+                openssl_echo(addr, &["-sigalgs", "rsa_pss_rsae_sha256"], b"sigalgs\n");
+            assert!(!ok, "handshake should fail");
+            let _ = se;
         },
     );
 }

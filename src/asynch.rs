@@ -256,6 +256,8 @@ where
                 .map_err(|e| TlsError::Io(e.kind()))?;
         }
 
+        handshake.validate_server_signature_scheme(private_key)?;
+
         for flight_record in handshake.flight() {
             send!(handshake.encode_flight_record(
                 *flight_record,
