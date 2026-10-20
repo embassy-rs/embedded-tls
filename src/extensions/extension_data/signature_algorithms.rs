@@ -56,44 +56,49 @@ pub enum SignatureScheme {
 }
 
 impl SignatureScheme {
-    pub fn parse(buf: &mut ParseBuffer) -> Result<Self, ParseError> {
-        match buf.read_u16()? {
-            0x0401 => Ok(Self::RsaPkcs1Sha256),
-            0x0501 => Ok(Self::RsaPkcs1Sha384),
-            0x0601 => Ok(Self::RsaPkcs1Sha512),
+    #[must_use]
+    pub fn of(raw: u16) -> Option<Self> {
+        match raw {
+            0x0401 => Some(Self::RsaPkcs1Sha256),
+            0x0501 => Some(Self::RsaPkcs1Sha384),
+            0x0601 => Some(Self::RsaPkcs1Sha512),
 
-            0x0403 => Ok(Self::EcdsaSecp256r1Sha256),
-            0x0503 => Ok(Self::EcdsaSecp384r1Sha384),
-            0x0603 => Ok(Self::EcdsaSecp521r1Sha512),
+            0x0403 => Some(Self::EcdsaSecp256r1Sha256),
+            0x0503 => Some(Self::EcdsaSecp384r1Sha384),
+            0x0603 => Some(Self::EcdsaSecp521r1Sha512),
 
-            0x0804 => Ok(Self::RsaPssRsaeSha256),
-            0x0805 => Ok(Self::RsaPssRsaeSha384),
-            0x0806 => Ok(Self::RsaPssRsaeSha512),
+            0x0804 => Some(Self::RsaPssRsaeSha256),
+            0x0805 => Some(Self::RsaPssRsaeSha384),
+            0x0806 => Some(Self::RsaPssRsaeSha512),
 
-            0x0807 => Ok(Self::Ed25519),
-            0x0808 => Ok(Self::Ed448),
+            0x0807 => Some(Self::Ed25519),
+            0x0808 => Some(Self::Ed448),
 
-            0x0809 => Ok(Self::RsaPssPssSha256),
-            0x080a => Ok(Self::RsaPssPssSha384),
-            0x080b => Ok(Self::RsaPssPssSha512),
+            0x0809 => Some(Self::RsaPssPssSha256),
+            0x080a => Some(Self::RsaPssPssSha384),
+            0x080b => Some(Self::RsaPssPssSha512),
 
-            0x0303 => Ok(Self::Sha224Ecdsa),
-            0x0301 => Ok(Self::Sha224Rsa),
-            0x0302 => Ok(Self::Sha224Dsa),
+            0x0303 => Some(Self::Sha224Ecdsa),
+            0x0301 => Some(Self::Sha224Rsa),
+            0x0302 => Some(Self::Sha224Dsa),
 
-            0x0201 => Ok(Self::RsaPkcs1Sha1),
-            0x0203 => Ok(Self::EcdsaSha1),
+            0x0201 => Some(Self::RsaPkcs1Sha1),
+            0x0203 => Some(Self::EcdsaSha1),
 
-            0x081A => Ok(Self::Sha256BrainpoolP256r1),
-            0x081B => Ok(Self::Sha384BrainpoolP384r1),
-            0x081C => Ok(Self::Sha512BrainpoolP512r1),
+            0x081A => Some(Self::Sha256BrainpoolP256r1),
+            0x081B => Some(Self::Sha384BrainpoolP384r1),
+            0x081C => Some(Self::Sha512BrainpoolP512r1),
 
-            0x0904 => Ok(Self::MlDsa44),
-            0x0905 => Ok(Self::MlDsa65),
-            0x0906 => Ok(Self::MlDsa87),
+            0x0904 => Some(Self::MlDsa44),
+            0x0905 => Some(Self::MlDsa65),
+            0x0906 => Some(Self::MlDsa87),
 
-            _ => Err(ParseError::InvalidData),
+            _ => None,
         }
+    }
+
+    pub fn parse(buf: &mut ParseBuffer) -> Result<Self, ParseError> {
+        Self::of(buf.read_u16()?).ok_or(ParseError::InvalidData)
     }
 
     #[must_use]
@@ -145,10 +150,18 @@ pub struct SignatureAlgorithms<const N: usize> {
 impl<const N: usize> SignatureAlgorithms<N> {
     pub fn parse(buf: &mut ParseBuffer) -> Result<Self, ParseError> {
         let data_length = buf.read_u16()? as usize;
-
+        let mut data = buf.slice(data_length)?;
+        let mut supported_signature_algorithms = Vec::new();
+        while !data.is_empty() {
+            let raw = data.read_u16()?;
+            if let Some(scheme) = SignatureScheme::of(raw) {
+                supported_signature_algorithms
+                    .push(scheme)
+                    .map_err(|_| ParseError::InsufficientSpace)?;
+            }
+        }
         Ok(Self {
-            supported_signature_algorithms: buf
-                .read_list::<_, N>(data_length, SignatureScheme::parse)?,
+            supported_signature_algorithms,
         })
     }
 
@@ -160,5 +173,34 @@ impl<const N: usize> SignatureAlgorithms<N> {
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod skip_unknown_tests {
+    use super::*;
+    use crate::parse_buffer::ParseBuffer;
+
+    #[test]
+    fn then_unknown_code_points_are_skipped() {
+        // length: 3 u16s = 6 bytes
+        let bytes = [0x00, 0x06, 0xFA, 0xFA, 0x04, 0x01, 0xAB, 0xCD];
+        let mut buf = ParseBuffer::new(&bytes);
+        let parsed = SignatureAlgorithms::<8>::parse(&mut buf).expect("parses");
+        const EXPECTED: usize = 1;
+        assert_eq!(parsed.supported_signature_algorithms.len(), EXPECTED);
+        assert_eq!(
+            parsed.supported_signature_algorithms[0],
+            SignatureScheme::RsaPkcs1Sha256
+        );
+    }
+
+    #[test]
+    fn then_malformed_length_is_rejected() {
+        // length says 3 bytes (odd), trailing partial u16
+        let bytes = [0x00, 0x03, 0x04, 0x01, 0xFF];
+        let mut buf = ParseBuffer::new(&bytes);
+        let result = SignatureAlgorithms::<8>::parse(&mut buf);
+        assert!(result.is_err());
     }
 }

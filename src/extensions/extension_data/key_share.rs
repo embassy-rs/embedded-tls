@@ -40,10 +40,19 @@ impl<'a, const N: usize> KeyShareClientHello<'a, N> {
             let opaque = data.slice(opaque_len)?;
             match NamedGroup::of(group_raw) {
                 Some(group) => {
-                    let _ = client_shares.push(KeyShareEntry {
-                        group,
-                        opaque: opaque.as_slice(),
-                    });
+                    // Drop shares this build cannot compute *before* insertion,
+                    // so a later usable share is never crowded out of the
+                    // bounded list (and never silently dropped once usable).
+                    #[cfg(feature = "server")]
+                    if !crate::server::can_compute(group) {
+                        continue;
+                    }
+                    client_shares
+                        .push(KeyShareEntry {
+                            group,
+                            opaque: opaque.as_slice(),
+                        })
+                        .map_err(|_| ParseError::InsufficientSpace)?;
                 }
                 None => {} // unknown group, skip
             }
@@ -163,6 +172,40 @@ mod tests {
         assert_eq!(NamedGroup::Secp256r1, result.group);
         assert_eq!(2, result.opaque.len());
         assert_eq!([0xAA, 0xBB], result.opaque);
+    }
+}
+
+#[cfg(test)]
+mod fragmented_key_share_tests {
+    use super::*;
+    use std::vec::Vec;
+
+    #[test]
+    #[cfg(feature = "server")]
+    fn then_a_trailing_usable_share_survives_bounded_insertion() {
+        let groups = [
+            NamedGroup::Secp384r1,
+            NamedGroup::Secp521r1,
+            NamedGroup::X448,
+            NamedGroup::Ffdhe2048,
+            NamedGroup::X25519,
+        ];
+        let mut list = Vec::new();
+        for group in groups {
+            list.extend_from_slice(&group.as_u16().to_be_bytes());
+            list.extend_from_slice(&4u16.to_be_bytes());
+            list.extend_from_slice(&[0xAA; 4]);
+        }
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&list);
+
+        let mut parse_buf = ParseBuffer::new(&buf);
+        let parsed = KeyShareClientHello::<4>::parse(&mut parse_buf).expect("parses");
+
+        const EXPECTED: usize = 1;
+        assert_eq!(parsed.client_shares.len(), EXPECTED);
+        assert_eq!(parsed.client_shares[0].group, NamedGroup::X25519);
     }
 }
 

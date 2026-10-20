@@ -209,11 +209,11 @@ where
             }};
         }
 
-        // Scoped so the record's borrow of the reader ends before the next read.
+        // Read the ClientHello (reassembling fragments in place).
         {
             let record = self
                 .record_reader
-                .read(&mut self.delegate, self.key_schedule.read_state())
+                .read_client_hello(&mut self.delegate, self.key_schedule.read_state())
                 .await?;
             handshake.absorb_client_hello(&record)?;
         }
@@ -237,7 +237,7 @@ where
             loop {
                 let record = self
                     .record_reader
-                    .read(&mut self.delegate, self.key_schedule.read_state())
+                    .read_client_hello(&mut self.delegate, self.key_schedule.read_state())
                     .await?;
                 if handshake.absorb_hello_retry_response(&record)? {
                     break;
@@ -255,8 +255,6 @@ where
                 .await
                 .map_err(|e| TlsError::Io(e.kind()))?;
         }
-
-        handshake.negotiate_alpn();
 
         for flight_record in handshake.flight() {
             send!(handshake.encode_flight_record(

@@ -305,6 +305,29 @@ fn test_both_server_may_fail(
 // ===========================================================================
 
 #[test]
+fn test_fragmented_client_hello() {
+    init_log();
+    test_both(
+        |c| c,
+        |addr| {
+            let long_proto = "a".repeat(250);
+            let alpn_arg = format!("{},{}", long_proto, long_proto);
+            let extra: Vec<&str> = vec![
+                "-ciphersuites",
+                "TLS_AES_128_GCM_SHA256",
+                "-max_send_frag",
+                "512",
+                "-alpn",
+                &alpn_arg,
+            ];
+            let (ok, resp, se) = openssl_echo(addr, &extra, b"hello\n");
+            assert!(ok, "failed.\nstderr: {se}");
+            assert!(String::from_utf8_lossy(&resp).contains("hello"), "no echo");
+        },
+    );
+}
+
+#[test]
 fn test_handshake_and_echo() {
     init_log();
     test_both(

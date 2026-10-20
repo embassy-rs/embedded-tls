@@ -15,6 +15,8 @@ use crate::buffer::CryptoBuffer;
 use crate::config::{TlsCipherSuite, TlsConfig};
 use crate::crypto::{ByteArray, TlsHash};
 use crate::extensions::extension_data::alpn::AlpnProtocolNameList;
+#[cfg(feature = "server")]
+use crate::extensions::extension_data::alpn::MAX_ALPN_PROTOCOLS;
 use crate::extensions::extension_data::key_share::{KeyShareClientHello, KeyShareEntry};
 use crate::extensions::extension_data::pre_shared_key::PreSharedKeyClientHello;
 use crate::extensions::extension_data::psk_key_exchange_modes::{
@@ -491,12 +493,12 @@ pub struct ParsedClientHello<'a> {
     pub session_id: &'a [u8],
     /// Cipher suite code points the client offered, so the server can check
     /// its own suite is among them before naming it in the ServerHello.
-    pub cipher_suites: Vec<u16, 16>,
+    pub cipher_suites: &'a [u8],
     /// Groups the client says it supports, so a HelloRetryRequest can name one
     /// of them rather than a group the client never offered.
     pub supported_groups: Vec<NamedGroup, 16>,
     pub key_shares: Vec<KeyShareEntry<'a>, 4>,
-    pub alpn_protocols: Vec<&'a [u8], 4>,
+    pub alpn_protocols: Vec<&'a [u8], MAX_ALPN_PROTOCOLS>,
 }
 
 #[cfg(feature = "server")]
@@ -519,22 +521,18 @@ impl<'a> ParsedClientHello<'a> {
             .map_err(|_| TlsError::InvalidSessionIdLength)?
             .as_slice();
 
-        // Cipher suites. Retained rather than skipped: the server must not
-        // name a suite in its ServerHello that the client did not offer.
+        // Cipher suites. Retained as the raw wire bytes rather than copied
+        // into a bounded Vec: the server must not name a suite in its
+        // ServerHello that the client did not offer, and truncating the list
+        // could hide a suite offered later in it.
         let cipher_suites_len = buf.read_u16().map_err(|_| TlsError::InvalidHandshake)? as usize;
-        let mut suites_buf = buf
+        if cipher_suites_len == 0 || !cipher_suites_len.is_multiple_of(2) {
+            return Err(TlsError::InvalidHandshake);
+        }
+        let suites_buf = buf
             .slice(cipher_suites_len)
             .map_err(|_| TlsError::InvalidHandshake)?;
-        let mut cipher_suites = Vec::new();
-        while !suites_buf.is_empty() {
-            let code_point = suites_buf
-                .read_u16()
-                .map_err(|_| TlsError::InvalidHandshake)?;
-            // Overflow past capacity is not an error: the server only needs to
-            // find its own suite, and a client offering more than 16 has
-            // already offered it if it is going to.
-            let _ = cipher_suites.push(code_point);
-        }
+        let cipher_suites = suites_buf.as_slice();
 
         // Compression methods
         let compression_len = buf.read_u8().map_err(|_| TlsError::InvalidHandshake)?;
@@ -558,10 +556,10 @@ impl<'a> ParsedClientHello<'a> {
                         // otherwise fill every slot with unusable groups and
                         // crowd out the usable share behind them, forcing a
                         // needless HelloRetryRequest.
-                        let usable =
-                            matches!(share.group, NamedGroup::Secp256r1 | NamedGroup::X25519);
-                        if usable {
-                            let _ = key_shares.push(share.clone());
+                        if crate::server::can_compute(share.group) {
+                            key_shares
+                                .push(share.clone())
+                                .map_err(|_| TlsError::InsufficientSpace)?;
                         }
                     }
                 }
@@ -579,7 +577,9 @@ impl<'a> ParsedClientHello<'a> {
                 }
                 ClientHelloExtension::ApplicationLayerProtocolNegotiation(alpn) => {
                     for proto in &alpn.protocols {
-                        let _ = alpn_protocols.push(*proto);
+                        alpn_protocols
+                            .push(*proto)
+                            .map_err(|_| TlsError::InsufficientSpace)?;
                     }
                 }
                 _ => {}
@@ -597,6 +597,16 @@ impl<'a> ParsedClientHello<'a> {
             key_shares,
             alpn_protocols,
         })
+    }
+}
+
+#[cfg(feature = "server")]
+impl<'a> ParsedClientHello<'a> {
+    /// Whether the client offered `code_point` among its cipher suites.
+    pub fn offers(&self, code_point: u16) -> bool {
+        self.cipher_suites
+            .chunks_exact(2)
+            .any(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]) == code_point)
     }
 }
 
@@ -664,6 +674,88 @@ mod server_tests {
         let hello = ParsedClientHello::parse(&mut buf).expect("parses");
 
         const EXPECTED_SUITE: u16 = 0x1301;
-        assert!(hello.cipher_suites.contains(&EXPECTED_SUITE));
+        assert!(hello.offers(EXPECTED_SUITE));
+    }
+
+    fn client_hello_with_alpn(protos: &[&[u8]]) -> std::vec::Vec<u8> {
+        let mut out = std::vec::Vec::new();
+        out.extend_from_slice(&LEGACY_VERSION.to_be_bytes());
+        out.extend_from_slice(&[0u8; 32]); // random
+        out.push(0); // empty session id
+        out.extend_from_slice(&[0x00, 0x02]); // cipher_suites length
+        out.extend_from_slice(&0x1301u16.to_be_bytes()); // TLS_AES_128_GCM_SHA256
+        out.extend_from_slice(&[0x01, 0x00]); // one null compression method
+
+        let mut extensions = std::vec::Vec::new();
+        // supported_versions
+        extensions.extend_from_slice(&0x002bu16.to_be_bytes());
+        extensions.extend_from_slice(&0x0003u16.to_be_bytes());
+        extensions.push(0x02);
+        extensions.extend_from_slice(&[0x03, 0x04]); // TLS 1.3
+
+        // ALPN
+        let mut alpn = std::vec::Vec::new();
+        for proto in protos {
+            alpn.push(proto.len() as u8);
+            alpn.extend_from_slice(proto);
+        }
+        let mut alpn_ext = std::vec::Vec::new();
+        alpn_ext.extend_from_slice(&(alpn.len() as u16).to_be_bytes());
+        alpn_ext.extend_from_slice(&alpn);
+        extensions.extend_from_slice(&0x0010u16.to_be_bytes());
+        extensions.extend_from_slice(&((alpn_ext.len()) as u16).to_be_bytes());
+        extensions.extend_from_slice(&alpn_ext);
+
+        out.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        out.extend_from_slice(&extensions);
+        out
+    }
+
+    fn client_hello_with_cipher_suites(suites: &[u16]) -> std::vec::Vec<u8> {
+        let mut out = std::vec::Vec::new();
+        out.extend_from_slice(&LEGACY_VERSION.to_be_bytes());
+        out.extend_from_slice(&[0u8; 32]); // random
+        out.push(0); // empty session id
+        out.extend_from_slice(&((suites.len() * 2) as u16).to_be_bytes());
+        for suite in suites {
+            out.extend_from_slice(&suite.to_be_bytes());
+        }
+        out.extend_from_slice(&[0x01, 0x00]); // one null compression method
+
+        let mut extensions = std::vec::Vec::new();
+        extensions.extend_from_slice(&0x002bu16.to_be_bytes());
+        extensions.extend_from_slice(&0x0003u16.to_be_bytes());
+        extensions.push(0x02);
+        extensions.extend_from_slice(&[0x03, 0x04]); // TLS 1.3
+
+        out.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        out.extend_from_slice(&extensions);
+        out
+    }
+
+    #[test]
+    fn then_alpn_protocols_are_not_truncated() {
+        let protos: [&[u8]; 5] = [b"h2", b"http/1.1", b"spdy/3", b"acme-tls/1", b"mqtt"];
+        let bytes = client_hello_with_alpn(&protos);
+        let mut buf = ParseBuffer::new(&bytes);
+
+        let hello = ParsedClientHello::parse(&mut buf).expect("parses");
+
+        const EXPECTED: usize = 5;
+        assert_eq!(hello.alpn_protocols.len(), EXPECTED);
+        assert_eq!(hello.alpn_protocols[4], b"mqtt");
+    }
+
+    #[test]
+    fn then_cipher_suites_are_not_truncated() {
+        let mut suites = std::vec![0u16; 16];
+        suites.push(0x1301);
+        let bytes = client_hello_with_cipher_suites(&suites);
+        let mut buf = ParseBuffer::new(&bytes);
+
+        let hello = ParsedClientHello::parse(&mut buf).expect("parses");
+
+        const EXPECTED_SUITE: u16 = 0x1301;
+        assert!(hello.offers(EXPECTED_SUITE));
     }
 }

@@ -3,6 +3,7 @@
 use crate::TlsError;
 use crate::buffer::CryptoBuffer;
 use crate::extensions::ExtensionType;
+#[cfg(feature = "server")]
 use crate::extensions::extension_data::key_share::{KeyShareEntry, KeyShareServerHello};
 use crate::extensions::extension_data::supported_groups::NamedGroup;
 use crate::extensions::extension_data::supported_versions::{SupportedVersionsServerHello, TLS13};
@@ -20,31 +21,6 @@ pub(crate) struct OwnedKeyShare {
     pub group: NamedGroup,
     pub bytes: [u8; MAX_KEY_SHARE],
     pub len: usize,
-}
-
-/// Longest legal ALPN protocol name: the wire encoding length-prefixes each
-/// name with a single byte.
-pub(crate) const MAX_ALPN_NAME: usize = 255;
-
-/// Owned copy of ALPN protocols extracted from `ParsedClientHello`.
-///
-/// Names are stored whole. Truncating them would let a configured protocol
-/// compare equal to a longer offered one that merely shares a prefix, so the
-/// server would echo a protocol the client never offered.
-pub(crate) struct OwnedAlpn {
-    pub data: [[u8; MAX_ALPN_NAME]; 4],
-    pub lens: [usize; 4],
-    pub count: usize,
-}
-
-impl OwnedAlpn {
-    pub fn new() -> Self {
-        Self {
-            data: [[0u8; MAX_ALPN_NAME]; 4],
-            lens: [0; 4],
-            count: 0,
-        }
-    }
 }
 
 /// Encode a `ServerHello` handshake message (type byte + u24 length + payload).
@@ -256,6 +232,15 @@ pub fn encode_finished(buf: &mut CryptoBuffer<'_>, verify_data: &[u8]) -> Result
         .map_err(|_| TlsError::EncodeError)?;
 
     buf.with_u24_length(|buf| buf.extend_from_slice(verify_data))
+}
+
+/// Whether this build's server can compute a key exchange for `group`.
+///
+/// This is the single source of truth for the groups the server retains from
+/// a client's key share list; both `KeyShareClientHello::parse` and
+/// `ParsedClientHello` consult it.
+pub(crate) fn can_compute(group: NamedGroup) -> bool {
+    matches!(group, NamedGroup::Secp256r1 | NamedGroup::X25519)
 }
 
 /// Compute ECDH shared secret for a given key share.

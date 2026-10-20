@@ -23,9 +23,9 @@ use crate::handshake::certificate::{
 use crate::key_schedule::KeySchedule;
 use crate::record::ServerRecord;
 use crate::server::{
-    MAX_ALPN_NAME, MAX_KEY_SHARE, OwnedAlpn, OwnedKeyShare, compute_ecdh, encode_certificate,
-    encode_certificate_request, encode_certificate_verify, encode_encrypted_extensions,
-    encode_finished, encode_hello_retry_request, encode_server_hello,
+    MAX_KEY_SHARE, OwnedKeyShare, compute_ecdh, encode_certificate, encode_certificate_request,
+    encode_certificate_verify, encode_encrypted_extensions, encode_finished,
+    encode_hello_retry_request, encode_server_hello,
 };
 use crate::server_config::TlsServerConfig;
 #[cfg(feature = "rustpki")]
@@ -87,14 +87,13 @@ pub(crate) struct ServerHandshake<'a, CipherSuite: TlsCipherSuite> {
     session_id: [u8; 32],
     session_id_len: usize,
     key_share: Option<OwnedKeyShare>,
-    alpn: OwnedAlpn,
     did_hrr: bool,
     /// Group to name in a HelloRetryRequest: always one the client offered.
     retry_group: Option<NamedGroup>,
     server_public_key: heapless::Vec<u8, 65>,
     shared_secret: heapless::Vec<u8, 32>,
     group: NamedGroup,
-    selected_alpn: Option<usize>,
+    selected_alpn: Option<&'a [u8]>,
     traffic_hash: Option<CipherSuite::Hash>,
     /// Owned copy of the client's certificate. The record buffer is reused
     /// between reads, so it cannot be borrowed until the CertificateVerify.
@@ -114,7 +113,6 @@ impl<'a, CipherSuite: TlsCipherSuite> ServerHandshake<'a, CipherSuite> {
             session_id: [0u8; 32],
             session_id_len: 0,
             key_share: None,
-            alpn: OwnedAlpn::new(),
             did_hrr: false,
             retry_group: None,
             server_public_key: heapless::Vec::new(),
@@ -159,7 +157,7 @@ impl<'a, CipherSuite: TlsCipherSuite> ServerHandshake<'a, CipherSuite> {
             return Err(TlsError::InvalidHandshake);
         };
 
-        if !ch.cipher_suites.contains(&CipherSuite::CODE_POINT) {
+        if !ch.offers(CipherSuite::CODE_POINT) {
             warn!("Client did not offer the server's cipher suite");
             return Err(TlsError::AbortHandshake(
                 AlertLevel::Fatal,
@@ -171,19 +169,16 @@ impl<'a, CipherSuite: TlsCipherSuite> ServerHandshake<'a, CipherSuite> {
         self.session_id[..self.session_id_len]
             .copy_from_slice(&ch.session_id[..self.session_id_len]);
 
-        for proto in &ch.alpn_protocols {
-            if self.alpn.count >= 4 {
-                break;
+        // Select at absorb time: server preference order, choosing a protocol
+        // the client also offered. The configured name outlives the handshake,
+        // so only its reference is stored.
+        if let Some(server_protocols) = self.config.alpn_protocols {
+            for server_protocol in server_protocols {
+                if ch.alpn_protocols.contains(server_protocol) {
+                    self.selected_alpn = Some(*server_protocol);
+                    break;
+                }
             }
-            if proto.len() > MAX_ALPN_NAME {
-                // Not a legal ALPN name; skip it rather than store a prefix
-                // that could half-match one of ours.
-                continue;
-            }
-            let len = proto.len();
-            self.alpn.data[self.alpn.count][..len].copy_from_slice(proto);
-            self.alpn.lens[self.alpn.count] = len;
-            self.alpn.count += 1;
         }
 
         // Prefer X25519, then P-256.
@@ -318,21 +313,6 @@ impl<'a, CipherSuite: TlsCipherSuite> ServerHandshake<'a, CipherSuite> {
         key_schedule.initialize_handshake_secret_server(&self.shared_secret)
     }
 
-    /// Pick the first server protocol the client also offered.
-    pub(crate) fn negotiate_alpn(&mut self) {
-        let Some(server_protocols) = self.config.alpn_protocols else {
-            return;
-        };
-        for server_protocol in server_protocols {
-            for i in 0..self.alpn.count {
-                if *server_protocol == &self.alpn.data[i][..self.alpn.lens[i]] {
-                    self.selected_alpn = Some(i);
-                    return;
-                }
-            }
-        }
-    }
-
     /// Encode one record of the server flight. All are encrypted, so all
     /// advance the write sequence counter.
     pub(crate) fn encode_flight_record<'b>(
@@ -344,9 +324,7 @@ impl<'a, CipherSuite: TlsCipherSuite> ServerHandshake<'a, CipherSuite> {
     ) -> Result<Outgoing<'b>, TlsError> {
         let bytes = match which {
             FlightRecord::EncryptedExtensions => {
-                let alpn: Option<&[u8]> = self
-                    .selected_alpn
-                    .map(|i| &self.alpn.data[i][..self.alpn.lens[i]] as &[u8]);
+                let alpn: Option<&[u8]> = self.selected_alpn;
                 let (wks, rks) = key_schedule.as_split();
                 tx_buf.write_handshake_record(true, wks, rks.transcript_hash(), |buf| {
                     encode_encrypted_extensions(buf, alpn)
