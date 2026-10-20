@@ -714,7 +714,8 @@ fn test_alpn_mismatch() {
             let (ok, _resp, se) = openssl_echo(addr, &["-alpn", "grpc"], b"mismatch\n");
             assert!(!ok, "handshake should fail");
             assert!(
-                se.contains("no application protocol") || se.contains("NO_APPLICATION_PROTOCOL"),
+                // Older OpenSSL prints only the number: no_application_protocol is 120.
+                se.contains("alert number 120"),
                 "expected no_application_protocol alert, got: {se}"
             );
         },
@@ -992,7 +993,8 @@ fn test_alpn_does_not_match_on_a_truncated_prefix() {
             let (ok, _resp, se) = openssl_echo(addr, &["-alpn", client_proto], b"prefix\n");
             assert!(!ok, "handshake should fail on ALPN mismatch: {se}");
             assert!(
-                se.contains("no application protocol") || se.contains("NO_APPLICATION_PROTOCOL"),
+                // Older OpenSSL prints only the number: no_application_protocol is 120.
+                se.contains("alert number 120"),
                 "expected no_application_protocol alert, got: {se}"
             );
         },
@@ -1214,7 +1216,7 @@ fn test_client_cert_rejected_sends_encrypted_alert() {
             // openssl can only name the alert if it was encrypted with the
             // keys it expects after the server's flight.
             assert!(
-                stderr.contains("alert bad certificate"),
+                stderr.contains("alert number 42"), // bad_certificate
                 "openssl did not read the bad_certificate alert: {se}"
             );
         },
