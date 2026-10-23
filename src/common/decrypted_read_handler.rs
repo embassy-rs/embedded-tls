@@ -5,8 +5,12 @@ use crate::{
     config::TlsCipherSuite, handshake::ServerHandshake, record::ServerRecord,
 };
 
+pub struct SourceBufferPtrRange(pub Range<*const u8>);
+
+unsafe impl Send for SourceBufferPtrRange {}
+
 pub struct DecryptedReadHandler<'a> {
-    pub source_buffer: Range<*const u8>,
+    pub source_buffer: SourceBufferPtrRange,
     pub buffer_info: &'a mut DecryptedBufferInfo,
     pub is_open: &'a mut bool,
 }
@@ -22,8 +26,8 @@ impl DecryptedReadHandler<'_> {
                 let slice_ptrs = slice.as_ptr_range();
 
                 debug_assert!(
-                    self.source_buffer.contains(&slice_ptrs.start)
-                        && self.source_buffer.contains(&slice_ptrs.end)
+                    self.source_buffer.0.contains(&slice_ptrs.start)
+                        && self.source_buffer.0.contains(&slice_ptrs.end)
                 );
 
                 let offset = unsafe {
@@ -33,7 +37,7 @@ impl DecryptedReadHandler<'_> {
                     // TODO: We are only assuming here that the pointers are derived from the read
                     // buffer. While this is reasonable, and we don't do any pointer magic,
                     // it's not an invariant.
-                    slice_ptrs.start.offset_from(self.source_buffer.start) as usize
+                    slice_ptrs.start.offset_from(self.source_buffer.0.start) as usize
                 };
 
                 self.buffer_info.offset = offset;

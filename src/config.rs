@@ -169,7 +169,7 @@ impl TlsClock for InsecureIgnoreDates {
 /// signed and writes the TLS encoding of the signature (the same encoding the
 /// built-in variants produce: DER `SEQUENCE { r, s }` for ECDSA, the raw 64-byte
 /// `R || S` for Ed25519).
-pub trait SigningKey {
+pub trait SigningKey: Sync {
     /// The signature scheme this key signs with.
     fn signature_scheme(&self) -> SignatureScheme;
 

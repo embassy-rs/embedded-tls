@@ -1,7 +1,7 @@
 use core::sync::atomic::Ordering;
 
 use crate::common::decrypted_buffer_info::DecryptedBufferInfo;
-use crate::common::decrypted_read_handler::DecryptedReadHandler;
+use crate::common::decrypted_read_handler::{DecryptedReadHandler, SourceBufferPtrRange};
 use crate::connection::{Handshake, State, decrypt_record};
 use crate::flush_policy::FlushPolicy;
 use crate::key_schedule::KeySchedule;
@@ -210,7 +210,7 @@ where
     }
 
     fn read_application_data(&mut self) -> Result<(), TlsError> {
-        let buf_ptr_range = self.record_reader.buf.as_ptr_range();
+        let buf_ptr_range = SourceBufferPtrRange(self.record_reader.buf.as_ptr_range());
         let key_schedule = self.key_schedule.read_state();
         let record = self
             .record_reader
@@ -377,7 +377,7 @@ where
     }
 
     fn read_application_data(&mut self) -> Result<(), TlsError> {
-        let buf_ptr_range = self.record_reader.buf.as_ptr_range();
+        let buf_ptr_range = SourceBufferPtrRange(self.record_reader.buf.as_ptr_range());
         let record = self
             .record_reader
             .read_blocking(&mut self.delegate, self.key_schedule)?;
