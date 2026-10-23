@@ -215,6 +215,8 @@ where
     shared: SharedState<CipherSuite>,
     client_state: WriteKeySchedule<CipherSuite>,
     server_state: ReadKeySchedule<CipherSuite>,
+    #[cfg(feature = "server")]
+    captured_traffic_hash: Option<CipherSuite::Hash>,
 }
 
 impl<CipherSuite> KeySchedule<CipherSuite>
@@ -232,6 +234,8 @@ where
                 state: KeyScheduleState::new(),
                 transcript_hash: CipherSuite::Hash::new(),
             },
+            #[cfg(feature = "server")]
+            captured_traffic_hash: None,
         }
     }
 
@@ -319,6 +323,89 @@ where
         self.shared.derived()
     }
 
+    /// Server counterpart of [`Self::initialize_handshake_secret`].
+    ///
+    /// The traffic-secret labels are swapped: a server writes with
+    /// `s hs traffic` and reads with `c hs traffic`.
+    #[cfg(feature = "server")]
+    pub fn initialize_handshake_secret_server(&mut self, ikm: &[u8]) -> Result<(), TlsError> {
+        self.shared.initialize(ikm);
+
+        self.calculate_traffic_secrets(b"s hs traffic", b"c hs traffic")?;
+        self.shared.derived()
+    }
+
+    /// Server counterpart of [`Self::initialize_master_secret`], with the
+    /// traffic-secret labels swapped as above.
+    #[cfg(feature = "server")]
+    pub fn initialize_master_secret_server(&mut self) -> Result<(), TlsError> {
+        let zero = HashOutput::<CipherSuite>::zeroed();
+        self.shared.initialize(zero.as_ref());
+
+        self.calculate_traffic_secrets(b"s ap traffic", b"c ap traffic")?;
+        self.shared.derived()
+    }
+
+    #[cfg(feature = "server")]
+    pub(crate) fn capture_traffic_hash(&mut self, hash: CipherSuite::Hash) {
+        self.captured_traffic_hash = Some(hash);
+    }
+
+    #[cfg(feature = "server")]
+    pub(crate) fn captured_traffic_hash(&self) -> Option<CipherSuite::Hash> {
+        self.captured_traffic_hash.clone()
+    }
+
+    #[cfg(feature = "server")]
+    pub(crate) fn derive_server_application_write_keys(
+        &mut self,
+        transcript: CipherSuite::Hash,
+    ) -> Result<(), TlsError> {
+        let zero = HashOutput::<CipherSuite>::zeroed();
+        self.shared.initialize(zero.as_ref());
+
+        let secret = self
+            .shared
+            .derive_secret(b"s ap traffic", ContextType::transcript_hash(&transcript))?;
+        let traffic_secret = Hkdf::<CipherSuite::Hash>::from_prk(secret.as_ref())?;
+
+        self.client_state
+            .state
+            .traffic_secret
+            .replace(traffic_secret);
+        self.client_state.state.traffic_secret.expand_label(
+            b"key",
+            ContextType::None,
+            self.client_state.state.key.as_mut(),
+        )?;
+        self.client_state.state.traffic_secret.expand_label(
+            b"iv",
+            ContextType::None,
+            &mut self.client_state.state.iv,
+        )?;
+        self.client_state.state.counter = 0;
+
+        self.shared.derived()
+    }
+
+    /// Replace the transcript with the synthetic `message_hash` that a
+    /// HelloRetryRequest requires (RFC 8446 section 4.4.1): the running
+    /// transcript is hashed, and that digest becomes the body of a synthetic
+    /// handshake message which starts the new transcript.
+    #[cfg(feature = "server")]
+    pub fn replace_transcript_with_message_hash(&mut self) -> Result<(), TlsError> {
+        let hash = self.server_state.transcript_hash.clone().finalize();
+        self.server_state.transcript_hash = CipherSuite::Hash::new();
+
+        let len = hash.as_ref().len() as u32;
+        self.server_state.transcript_hash.update(&[0xFE]);
+        self.server_state
+            .transcript_hash
+            .update(&len.to_be_bytes()[1..]);
+        self.server_state.transcript_hash.update(hash.as_ref());
+        Ok(())
+    }
+
     fn calculate_traffic_secrets(
         &mut self,
         client_label: &[u8],
@@ -360,6 +447,11 @@ impl<CipherSuite> WriteKeySchedule<CipherSuite>
 where
     CipherSuite: TlsCipherSuite,
 {
+    #[cfg(feature = "server")]
+    pub(crate) fn has_keys(&self) -> bool {
+        matches!(self.state.traffic_secret, Secret::Initialized(_))
+    }
+
     pub(crate) fn increment_counter(&mut self) {
         self.state.increment_counter();
     }

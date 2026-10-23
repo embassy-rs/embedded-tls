@@ -25,11 +25,14 @@ jobs:
       - name: Run `cargo ${{ matrix.subcmd }}` for library
         run: cargo ${{ matrix.subcmd }} --features webpki,rustpki,rsa,p256,p384,ed25519
 
+      - name: Run `cargo ${{ matrix.subcmd }}` for library with server
+        run: cargo ${{ matrix.subcmd }} --features webpki,rustpki,rsa,p256,p384,ed25519,server
+
   example-ci:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        example: [blocking, tokio, tokio-psk, embassy, stm32h5]
+        example: [blocking, tokio, tokio-psk, embassy, stm32h5, blocking-server, tokio-server]
 
     steps:
       - uses: actions/checkout@v4

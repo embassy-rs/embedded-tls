@@ -56,6 +56,11 @@ macro_rules! extension_group {
                         // which it recognizes and which is not specified for the message in
                         // which it appears, it MUST abort the handshake with an
                         // "illegal_parameter" alert.
+                        //
+                        // Extensions real clients send that the spec table omits
+                        // (e.g. compress_certificate from curl and Chrome) are listed
+                        // explicitly on ClientHelloExtension rather than tolerated here,
+                        // so this guard stays in force for every other message type.
                         Err(crate::TlsError::AbortHandshake(
                             crate::alert::AlertLevel::Fatal,
                             crate::alert::AlertDescription::IllegalParameter,

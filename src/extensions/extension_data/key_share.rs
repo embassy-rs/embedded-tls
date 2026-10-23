@@ -29,9 +29,35 @@ pub struct KeyShareClientHello<'a, const N: usize> {
 impl<'a, const N: usize> KeyShareClientHello<'a, N> {
     pub fn parse(buf: &mut ParseBuffer<'a>) -> Result<Self, ParseError> {
         let len = buf.read_u16()? as usize;
-        Ok(KeyShareClientHello {
-            client_shares: buf.read_list(len, KeyShareEntry::parse)?,
-        })
+        let mut data = buf.slice(len)?;
+        let mut client_shares = Vec::new();
+        // Skip key shares with unknown groups (e.g. GREASE, unrecognised PQ hybrids)
+        // per RFC 8446 §4.2.8: "the server MUST check ... that it is willing to
+        // negotiate ... and ignore all others."
+        while !data.is_empty() {
+            let group_raw = data.read_u16()?;
+            let opaque_len = data.read_u16()? as usize;
+            let opaque = data.slice(opaque_len)?;
+            match NamedGroup::of(group_raw) {
+                Some(group) => {
+                    // Drop shares this build cannot compute *before* insertion,
+                    // so a later usable share is never crowded out of the
+                    // bounded list (and never silently dropped once usable).
+                    #[cfg(feature = "server")]
+                    if !crate::server::can_compute(group) {
+                        continue;
+                    }
+                    client_shares
+                        .push(KeyShareEntry {
+                            group,
+                            opaque: opaque.as_slice(),
+                        })
+                        .map_err(|_| ParseError::InsufficientSpace)?;
+                }
+                None => {} // unknown group, skip
+            }
+        }
+        Ok(KeyShareClientHello { client_shares })
     }
 
     pub fn encode(&self, buf: &mut CryptoBuffer) -> Result<(), TlsError> {
@@ -62,6 +88,21 @@ impl KeyShareHelloRetryRequest {
         self.selected_group.encode(buf)
     }
 }
+
+/// How many key shares a `ClientHello` can carry.
+///
+/// A client offers at most two, one ephemeral key, plus one hybrid when that
+/// feature is enabled, so a client-only build pays for exactly that.
+///
+/// A server has to parse whatever the peer sent rather than what it would have
+/// chosen itself, and stopping early would mean missing a usable share sitting
+/// behind groups the server cannot compute, costing an avoidable
+/// HelloRetryRequest round trip.
+#[cfg(not(feature = "server"))]
+pub(crate) const MAX_CLIENT_KEY_SHARES: usize = 2;
+/// See [`MAX_CLIENT_KEY_SHARES`].
+#[cfg(feature = "server")]
+pub(crate) const MAX_CLIENT_KEY_SHARES: usize = 4;
 
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -131,5 +172,60 @@ mod tests {
         assert_eq!(NamedGroup::Secp256r1, result.group);
         assert_eq!(2, result.opaque.len());
         assert_eq!([0xAA, 0xBB], result.opaque);
+    }
+}
+
+#[cfg(test)]
+mod fragmented_key_share_tests {
+    use super::*;
+    use std::vec::Vec;
+
+    #[test]
+    #[cfg(feature = "server")]
+    fn then_a_trailing_usable_share_survives_bounded_insertion() {
+        let groups = [
+            NamedGroup::Secp384r1,
+            NamedGroup::Secp521r1,
+            NamedGroup::X448,
+            NamedGroup::Ffdhe2048,
+            NamedGroup::X25519,
+        ];
+        let mut list = Vec::new();
+        for group in groups {
+            list.extend_from_slice(&group.as_u16().to_be_bytes());
+            list.extend_from_slice(&4u16.to_be_bytes());
+            list.extend_from_slice(&[0xAA; 4]);
+        }
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&list);
+
+        let mut parse_buf = ParseBuffer::new(&buf);
+        let parsed = KeyShareClientHello::<4>::parse(&mut parse_buf).expect("parses");
+
+        const EXPECTED: usize = 1;
+        assert_eq!(parsed.client_shares.len(), EXPECTED);
+        assert_eq!(parsed.client_shares[0].group, NamedGroup::X25519);
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    /// A client-only build must not pay for the server's parsing headroom.
+    #[test]
+    #[cfg(not(feature = "server"))]
+    fn then_a_client_only_build_holds_two_key_shares() {
+        const EXPECTED: usize = 2;
+        assert_eq!(MAX_CLIENT_KEY_SHARES, EXPECTED);
+    }
+
+    /// A server must parse what the peer sent, not what it would have chosen.
+    #[test]
+    #[cfg(feature = "server")]
+    fn then_a_server_build_holds_four_key_shares() {
+        const EXPECTED: usize = 4;
+        assert_eq!(MAX_CLIENT_KEY_SHARES, EXPECTED);
     }
 }

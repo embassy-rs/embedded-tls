@@ -124,6 +124,187 @@ where
         Ok(())
     }
 
+    /// Accept a TLS connection as the server.
+    /// The handshake logic lives in [`crate::server_handshake`]; this method is
+    /// the async I/O driver over it.
+    ///
+    /// On failure the peer is told why with a TLS alert before the error is
+    /// returned, so interop problems are diagnosable from the client side.
+    #[cfg(feature = "server")]
+    pub async fn open_server<Clock>(
+        &mut self,
+        context: crate::server_config::TlsServerContext<'_, Clock>,
+    ) -> Result<(), TlsError>
+    where
+        Clock: crate::config::TlsClock,
+    {
+        let result = self.open_server_handshake(context).await;
+
+        if let Err(error) = &result
+            && let Some((level, description)) = crate::server_handshake::alert_for(error)
+        {
+            // Best effort: the peer may already have gone away.
+            let _ = self.send_handshake_alert(level, description).await;
+        }
+
+        result
+    }
+
+    /// Encode and send a fatal alert. Failures here are not reported: the
+    /// handshake error that triggered the alert is what the caller needs.
+    #[cfg(feature = "server")]
+    async fn send_handshake_alert(
+        &mut self,
+        level: crate::alert::AlertLevel,
+        description: crate::alert::AlertDescription,
+    ) -> Result<(), TlsError> {
+        if let Some(hash) = self.key_schedule.captured_traffic_hash() {
+            let _ = self.key_schedule.derive_server_application_write_keys(hash);
+        }
+        let (write_key_schedule, read_key_schedule) = self.key_schedule.as_split();
+        let encrypted = write_key_schedule.has_keys();
+        let tx = self.record_write_buf.write_record(
+            &ClientRecord::Alert(crate::alert::Alert { level, description }, encrypted),
+            write_key_schedule,
+            Some(read_key_schedule),
+        )?;
+        if encrypted {
+            self.key_schedule.write_state().increment_counter();
+        }
+        self.delegate
+            .write_all(tx)
+            .await
+            .map_err(|e| TlsError::Io(e.kind()))?;
+        self.delegate
+            .flush()
+            .await
+            .map_err(|e| TlsError::Io(e.kind()))?;
+        Ok(())
+    }
+
+    #[cfg(feature = "server")]
+    async fn open_server_handshake<Clock>(
+        &mut self,
+        context: crate::server_config::TlsServerContext<'_, Clock>,
+    ) -> Result<(), TlsError>
+    where
+        Clock: crate::config::TlsClock,
+    {
+        use crate::server_handshake::{CHANGE_CIPHER_SPEC, ServerHandshake};
+
+        let crate::server_config::TlsServerContext {
+            config,
+            private_key,
+            ..
+        } = context;
+        let mut handshake: ServerHandshake<'_, CipherSuite> = ServerHandshake::new(config);
+
+        macro_rules! send {
+            ($outgoing:expr) => {{
+                let out = $outgoing;
+                self.delegate
+                    .write_all(out.bytes)
+                    .await
+                    .map_err(|e| TlsError::Io(e.kind()))?;
+                if out.encrypted {
+                    self.key_schedule.write_state().increment_counter();
+                }
+                self.delegate
+                    .flush()
+                    .await
+                    .map_err(|e| TlsError::Io(e.kind()))?;
+            }};
+        }
+
+        // Read the ClientHello (reassembling fragments in place).
+        {
+            let record = self
+                .record_reader
+                .read_client_hello(&mut self.delegate, self.key_schedule.read_state())
+                .await?;
+            handshake.absorb_client_hello(&record)?;
+        }
+
+        if handshake.needs_hello_retry() {
+            send!(
+                handshake.encode_hello_retry_request(
+                    &mut self.key_schedule,
+                    &mut self.record_write_buf
+                )?
+            );
+            self.delegate
+                .write_all(&CHANGE_CIPHER_SPEC)
+                .await
+                .map_err(|e| TlsError::Io(e.kind()))?;
+            self.delegate
+                .flush()
+                .await
+                .map_err(|e| TlsError::Io(e.kind()))?;
+
+            loop {
+                let record = self
+                    .record_reader
+                    .read_client_hello(&mut self.delegate, self.key_schedule.read_state())
+                    .await?;
+                if handshake.absorb_hello_retry_response(&record)? {
+                    break;
+                }
+            }
+        }
+
+        handshake.compute_keys(&mut self.key_schedule)?;
+        send!(handshake.encode_server_hello(&mut self.key_schedule, &mut self.record_write_buf)?);
+        handshake.init_handshake_secret(&mut self.key_schedule)?;
+
+        if !handshake.did_hrr() {
+            self.delegate
+                .write_all(&CHANGE_CIPHER_SPEC)
+                .await
+                .map_err(|e| TlsError::Io(e.kind()))?;
+        }
+
+        handshake.validate_server_signature_scheme(private_key)?;
+
+        for flight_record in handshake.flight() {
+            send!(handshake.encode_flight_record(
+                *flight_record,
+                private_key,
+                &mut self.key_schedule,
+                &mut self.record_write_buf
+            )?);
+        }
+
+        handshake.capture_traffic_hash(&mut self.key_schedule);
+
+        loop {
+            let record = self
+                .record_reader
+                .read(&mut self.delegate, self.key_schedule.read_state())
+                .await?;
+            if handshake.process_client_record::<Clock>(&mut self.key_schedule, record)? {
+                break;
+            }
+        }
+
+        handshake.finalize(&mut self.key_schedule)?;
+        *self.opened.get_mut() = true;
+        self.delegate
+            .flush()
+            .await
+            .map_err(|e| TlsError::Io(e.kind()))?;
+
+        Ok(())
+    }
+
+    /// Encrypt and send the provided slice over the connection. The connection
+    /// must be opened before writing.
+    ///
+    /// The slice may be buffered internally and not written to the connection immediately.
+    /// In this case [`Self::flush()`] should be called to force the currently buffered writes
+    /// to be written to the connection.
+    ///
+    /// Returns the number of bytes buffered/written.
+
     /// Encrypt and send the provided slice over the connection. The connection
     /// must be opened before writing.
     ///
