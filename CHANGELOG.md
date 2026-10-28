@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+- Added `TlsConnection::export_keying_material`, the TLS 1.3 exporter (RFC 8446 section 7.5), for protocols that derive keys from the session such as NTS (RFC 8915).
 - Fix the client accepting a server `Finished` without server authentication (#215). The client now requires a verified `Certificate` and `CertificateVerify`, in that order, or a pre-shared key it offered.
 - A `write` or `flush` that is cancelled or fails part way through a TLS record is completed by the next `write` or `flush`.
 - A blocking `read` that fails part way through a record is completed by the next `read`.
