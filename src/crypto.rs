@@ -451,31 +451,29 @@ pub(crate) struct RsaRng;
 use embassy_crypto::rng_fill_bytes;
 
 #[cfg(feature = "rsa")]
-impl rsa::rand_core::RngCore for RsaRng {
-    fn next_u32(&mut self) -> u32 {
+impl rsa::rand_core::TryRng for RsaRng {
+    type Error = core::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
         let mut buf = [0; 4];
-        self.fill_bytes(&mut buf);
-        u32::from_le_bytes(buf)
+        rng_fill_bytes(&mut buf);
+        Ok(u32::from_le_bytes(buf))
     }
 
-    fn next_u64(&mut self) -> u64 {
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
         let mut buf = [0; 8];
-        self.fill_bytes(&mut buf);
-        u64::from_le_bytes(buf)
+        rng_fill_bytes(&mut buf);
+        Ok(u64::from_le_bytes(buf))
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        rng_fill_bytes(dest);
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rsa::rand_core::Error> {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
         rng_fill_bytes(dest);
         Ok(())
     }
 }
 
 #[cfg(feature = "rsa")]
-impl rsa::rand_core::CryptoRng for RsaRng {}
+impl rsa::rand_core::TryCryptoRng for RsaRng {}
 
 // ---------------------------------------------------------------------------
 // CertificateVerify

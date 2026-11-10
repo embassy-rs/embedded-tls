@@ -225,7 +225,7 @@ pub enum PrivateKey {
     Ed25519(embassy_crypto::ed25519::SigningKey),
     /// RSA, signing with RSASSA-PSS over SHA-256 (`rsa_pss_rsae_sha256`).
     #[cfg(feature = "rsa")]
-    Rsa(rsa::RsaPrivateKey),
+    Rsa(rsa::PrivateKey),
     /// A key held outside this crate, signed by a [`SigningKey`] implementation.
     ///
     /// Use this when the private key never leaves its hardware — an HSM, TPM or

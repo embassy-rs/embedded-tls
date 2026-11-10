@@ -18,7 +18,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 embassy-crypto = { version = "0.1.0", git = "https://github.com/embassy-rs/embassy", rev = "822a76ea91f2c0885c6eb0c65fe91181e31133e1" }
 portable-atomic = { version = "1.6.0", default-features = false }
-rsa = { version = "0.9.9", default-features = false, features = ["sha2"], optional = true }
+rsa = { version = "0.10.0", default-features = false, features = ["encoding", "pkcs1v15"], optional = true }
 heapless = { version = "0.9", default-features = false }
 embedded-io = "0.7"
 embedded-io-async = "0.7"
