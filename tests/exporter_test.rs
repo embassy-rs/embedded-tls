@@ -1,5 +1,5 @@
 // The TLS 1.3 exporter must produce the same keying material as rustls on the other end of the same handshake.
-#![cfg(feature = "p256")]
+#![cfg(all(feature = "p256", feature = "exporter"))]
 
 use embedded_io_adapters::tokio_1::FromTokio;
 use embedded_tls::*;

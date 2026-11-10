@@ -39,9 +39,10 @@ where
     Socket: AsyncRead + AsyncWrite + 'a,
     CipherSuite: TlsCipherSuite + 'static,
 {
-    /// Derives keying material from the finished handshake (TLS exporter, RFC 8446 section 7.5; RFC 5705 for TLS 1.2).
+    /// Derives keying material from the finished handshake (TLS exporter, RFC 8446 section 7.5).
     /// Protocols layered on TLS use it to bind keys to the session, for example NTS (RFC 8915) and channel bindings
     /// (RFC 9266). Fails with [`TlsError::InternalError`] before the handshake has completed.
+    #[cfg(feature = "exporter")]
     pub fn export_keying_material(
         &self,
         label: &[u8],
