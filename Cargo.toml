@@ -12,7 +12,7 @@ keywords = ["embedded", "async", "tls", "no_std", "network"]
 exclude = [".github", ".cargo"]
 
 [package.metadata.docs.rs]
-features = ["webpki", "rustpki", "rsa", "ed25519", "p256", "p384", "x25519", "mlkem"]
+features = ["webpki", "rustpki", "rsa", "ed25519", "p256", "p384", "x25519", "mlkem", "exporter"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
@@ -59,3 +59,4 @@ p256 = []
 p384 = []
 x25519 = []
 mlkem = ["dep:dhkem", "dep:ml-kem"]
+exporter = []
