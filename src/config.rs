@@ -526,9 +526,11 @@ impl Default for TlsConfig<'_> {
     }
 }
 
+/// A public key certificate.
 #[derive(Debug, Copy, Clone, PartialEq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Certificate<D> {
+    /// X.509 DER.
     X509(D),
     RawPublicKey(D),
 }
