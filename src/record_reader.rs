@@ -2,6 +2,8 @@ use crate::key_schedule::ReadKeySchedule;
 use embedded_io::{Error, Read as BlockingRead};
 use embedded_io_async::Read as AsyncRead;
 
+#[allow(unused_imports)]
+use crate::content_types::ContentType;
 use crate::{
     TlsError,
     config::TlsCipherSuite,
@@ -78,6 +80,41 @@ impl<'a> RecordReader<'a> {
         key_schedule: &mut ReadKeySchedule<CipherSuite>,
     ) -> Result<ServerRecord<'m, CipherSuite>, TlsError> {
         read_blocking(
+            self.buf,
+            &mut self.decoded,
+            &mut self.pending,
+            &mut self.header_buf,
+            &mut self.header_read,
+            transport,
+            key_schedule,
+        )
+    }
+
+    #[cfg(feature = "server")]
+    pub async fn read_client_hello<'m, CipherSuite: TlsCipherSuite>(
+        &'m mut self,
+        transport: &mut impl AsyncRead,
+        key_schedule: &mut ReadKeySchedule<CipherSuite>,
+    ) -> Result<ServerRecord<'m, CipherSuite>, TlsError> {
+        read_client_hello(
+            self.buf,
+            &mut self.decoded,
+            &mut self.pending,
+            &mut self.header_buf,
+            &mut self.header_read,
+            transport,
+            key_schedule,
+        )
+        .await
+    }
+
+    #[cfg(feature = "server")]
+    pub fn read_client_hello_blocking<'m, CipherSuite: TlsCipherSuite>(
+        &'m mut self,
+        transport: &mut impl BlockingRead,
+        key_schedule: &mut ReadKeySchedule<CipherSuite>,
+    ) -> Result<ServerRecord<'m, CipherSuite>, TlsError> {
+        read_client_hello_blocking(
             self.buf,
             &mut self.decoded,
             &mut self.pending,
@@ -265,6 +302,227 @@ fn consume<'m, CipherSuite: TlsCipherSuite>(
     ServerRecord::decode(header, slice, digest)
 }
 
+#[cfg(feature = "server")]
+async fn read_client_hello<'m, CipherSuite: TlsCipherSuite>(
+    buf: &'m mut [u8],
+    decoded: &mut usize,
+    pending: &mut usize,
+    header_buf: &mut [u8; RecordHeader::LEN],
+    header_read: &mut usize,
+    transport: &mut impl AsyncRead,
+    key_schedule: &mut ReadKeySchedule<CipherSuite>,
+) -> Result<ServerRecord<'m, CipherSuite>, TlsError> {
+    use crate::change_cipher_spec::ChangeCipherSpec;
+    use crate::handshake::ServerHandshake as HandshakeMessage;
+    use crate::parse_buffer::ParseBuffer;
+
+    loop {
+        // Read a record header.
+        while *header_read < RecordHeader::LEN {
+            let n = transport
+                .read(&mut header_buf[*header_read..])
+                .await
+                .map_err(|e| TlsError::Io(e.kind()))?;
+            if n == 0 {
+                return Err(TlsError::IoError);
+            }
+            *header_read += n;
+        }
+        let header = RecordHeader::decode(*header_buf)?;
+        let content_type = header.content_type();
+        let amount = header.content_length();
+
+        // Leading ChangeCipherSpec records are allowed before the handshake
+        // message has started; once reassembly has begun they are rejected.
+        if content_type == ContentType::ChangeCipherSpec {
+            if *pending != 0 {
+                return Err(TlsError::InvalidHandshake);
+            }
+            if amount + *decoded > buf.len() {
+                if amount > buf.len() {
+                    return Err(TlsError::InsufficientSpace);
+                }
+                buf.copy_within(*decoded..*decoded + *pending, 0);
+                *decoded = 0;
+            }
+            // Capture where this record's payload will land.
+            let start = *decoded;
+            let mut read = 0usize;
+            while read < amount {
+                let n = transport
+                    .read(&mut buf[start + read..][..amount - read])
+                    .await
+                    .map_err(|e| TlsError::Io(e.kind()))?;
+                if n == 0 {
+                    return Err(TlsError::IoError);
+                }
+                read += n;
+            }
+            let slice = &mut buf[start..start + amount];
+            let _ = ChangeCipherSpec::read(slice)?;
+            *decoded += amount;
+            *header_read = 0;
+            continue;
+        }
+
+        if content_type != ContentType::Handshake {
+            return Err(TlsError::InvalidHandshake);
+        }
+
+        // Make room for the new fragment, compacting earlier fragments if needed.
+        if *pending + amount > buf.len() {
+            return Err(TlsError::InsufficientSpace);
+        }
+        if *decoded + *pending + amount > buf.len() {
+            buf.copy_within(*decoded..*decoded + *pending, 0);
+            *decoded = 0;
+        }
+
+        let start = *decoded;
+        let mut read = 0usize;
+        while read < amount {
+            let n = transport
+                .read(&mut buf[start + *pending + read..][..amount - read])
+                .await
+                .map_err(|e| TlsError::Io(e.kind()))?;
+            if n == 0 {
+                return Err(TlsError::IoError);
+            }
+            read += n;
+        }
+        *pending += amount;
+        *header_read = 0;
+
+        // Check whether the handshake message is now complete.
+        if *pending >= 4 {
+            let msg_len = ((buf[start + 1] as usize) << 16)
+                | ((buf[start + 2] as usize) << 8)
+                | (buf[start + 3] as usize);
+            let total_needed = 4 + msg_len;
+            if *pending > total_needed {
+                return Err(TlsError::InvalidHandshake);
+            }
+            if *pending >= total_needed {
+                break;
+            }
+        }
+    }
+
+    let mut parse_buf = ParseBuffer::new(&buf[*decoded..*decoded + *pending]);
+    let hs = HandshakeMessage::read(&mut parse_buf, key_schedule.transcript_hash())?;
+    let record = ServerRecord::Handshake(hs);
+    *decoded += *pending;
+    *pending = 0;
+    *header_read = 0;
+    Ok(record)
+}
+
+#[cfg(feature = "server")]
+fn read_client_hello_blocking<'m, CipherSuite: TlsCipherSuite>(
+    buf: &'m mut [u8],
+    decoded: &mut usize,
+    pending: &mut usize,
+    header_buf: &mut [u8; RecordHeader::LEN],
+    header_read: &mut usize,
+    transport: &mut impl BlockingRead,
+    key_schedule: &mut ReadKeySchedule<CipherSuite>,
+) -> Result<ServerRecord<'m, CipherSuite>, TlsError> {
+    use crate::change_cipher_spec::ChangeCipherSpec;
+    use crate::handshake::ServerHandshake as HandshakeMessage;
+    use crate::parse_buffer::ParseBuffer;
+
+    loop {
+        while *header_read < RecordHeader::LEN {
+            let n = transport
+                .read(&mut header_buf[*header_read..])
+                .map_err(|e| TlsError::Io(e.kind()))?;
+            if n == 0 {
+                return Err(TlsError::IoError);
+            }
+            *header_read += n;
+        }
+        let header = RecordHeader::decode(*header_buf)?;
+        let content_type = header.content_type();
+        let amount = header.content_length();
+
+        if content_type == ContentType::ChangeCipherSpec {
+            if *pending != 0 {
+                return Err(TlsError::InvalidHandshake);
+            }
+            if *pending + amount > buf.len() {
+                return Err(TlsError::InsufficientSpace);
+            }
+            if *decoded + *pending + amount > buf.len() {
+                buf.copy_within(*decoded..*decoded + *pending, 0);
+                *decoded = 0;
+            }
+            let start = *decoded;
+            let mut read = 0usize;
+            while read < amount {
+                let n = transport
+                    .read(&mut buf[start + read..][..amount - read])
+                    .map_err(|e| TlsError::Io(e.kind()))?;
+                if n == 0 {
+                    return Err(TlsError::IoError);
+                }
+                read += n;
+            }
+            let slice = &mut buf[start..start + amount];
+            let _ = ChangeCipherSpec::read(slice)?;
+            *decoded += amount;
+            *header_read = 0;
+            continue;
+        }
+
+        if content_type != ContentType::Handshake {
+            return Err(TlsError::InvalidHandshake);
+        }
+
+        if *pending + amount > buf.len() {
+            return Err(TlsError::InsufficientSpace);
+        }
+        if *decoded + *pending + amount > buf.len() {
+            buf.copy_within(*decoded..*decoded + *pending, 0);
+            *decoded = 0;
+        }
+
+        let start = *decoded;
+        let mut read = 0usize;
+        while read < amount {
+            let n = transport
+                .read(&mut buf[start + *pending + read..][..amount - read])
+                .map_err(|e| TlsError::Io(e.kind()))?;
+            if n == 0 {
+                return Err(TlsError::IoError);
+            }
+            read += n;
+        }
+        *pending += amount;
+        *header_read = 0;
+
+        if *pending >= 4 {
+            let msg_len = ((buf[start + 1] as usize) << 16)
+                | ((buf[start + 2] as usize) << 8)
+                | (buf[start + 3] as usize);
+            let total_needed = 4 + msg_len;
+            if *pending > total_needed {
+                return Err(TlsError::InvalidHandshake);
+            }
+            if *pending >= total_needed {
+                break;
+            }
+        }
+    }
+
+    let mut parse_buf = ParseBuffer::new(&buf[*decoded..*decoded + *pending]);
+    let hs = HandshakeMessage::read(&mut parse_buf, key_schedule.transcript_hash())?;
+    let record = ServerRecord::Handshake(hs);
+    *decoded += *pending;
+    *pending = 0;
+    *header_read = 0;
+    Ok(record)
+}
+
 fn ensure_contiguous(
     buf: &mut [u8],
     decoded: &mut usize,
@@ -292,7 +550,7 @@ mod tests {
     use core::convert::Infallible;
 
     use super::*;
-    use crate::{Aes128GcmSha256, content_types::ContentType, key_schedule::KeySchedule};
+    use crate::{Aes128GcmSha256, key_schedule::KeySchedule};
 
     struct ChunkRead<'a>(&'a [u8], usize);
 
@@ -539,5 +797,147 @@ mod tests {
         for chunk_size in 1..=8 {
             advance_resume_case(chunk_size);
         }
+    }
+}
+
+#[cfg(test)]
+mod reassembly_tests {
+    use super::*;
+    use crate::{Aes128GcmSha256, key_schedule::KeySchedule};
+    use core::convert::Infallible;
+    use embedded_io::Read as BlockingRead;
+
+    struct ChunkRead<'a>(&'a [u8], usize);
+
+    impl embedded_io::ErrorType for ChunkRead<'_> {
+        type Error = Infallible;
+    }
+
+    impl BlockingRead for ChunkRead<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            let len = usize::min(self.1, buf.len());
+            let len = usize::min(len, self.0.len());
+            buf[..len].copy_from_slice(&self.0[..len]);
+            self.0 = &self.0[len..];
+            Ok(len)
+        }
+    }
+
+    fn build_client_hello_handshake() -> std::vec::Vec<u8> {
+        let mut body = std::vec::Vec::new();
+        body.extend_from_slice(&0x0303u16.to_be_bytes()); // legacy version
+        body.extend_from_slice(&[0u8; 32]); // random
+        body.push(0); // session id
+        body.extend_from_slice(&[0x00, 0x02]); // cipher suites length
+        body.extend_from_slice(&0x1301u16.to_be_bytes()); // TLS_AES_128_GCM_SHA256
+        body.push(0x01); // compression methods length
+        body.push(0x00); // null compression
+        // supported_versions extension
+        let mut ext = std::vec::Vec::new();
+        ext.extend_from_slice(&0x002bu16.to_be_bytes());
+        ext.extend_from_slice(&0x0003u16.to_be_bytes());
+        ext.push(0x02);
+        ext.extend_from_slice(&[0x03, 0x04]); // TLS 1.3
+        body.extend_from_slice(&(ext.len() as u16).to_be_bytes());
+        body.extend_from_slice(&ext);
+
+        let mut msg = std::vec::Vec::new();
+        msg.push(0x01); // ClientHello
+        let len = body.len() as u32;
+        msg.push(((len >> 16) & 0xff) as u8);
+        msg.push(((len >> 8) & 0xff) as u8);
+        msg.push((len & 0xff) as u8);
+        msg.extend_from_slice(&body);
+        msg
+    }
+
+    fn wrap_record(ct: u8, payload: &[u8]) -> std::vec::Vec<u8> {
+        let mut out = std::vec::Vec::new();
+        out.push(ct);
+        out.extend_from_slice(&[0x03, 0x01]);
+        out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    #[test]
+    #[cfg(feature = "server")]
+    fn then_fragmented_client_hello_reassembles() {
+        let msg = build_client_hello_handshake();
+        let split = 7;
+        let mut transport_bytes = std::vec::Vec::new();
+        transport_bytes.extend_from_slice(&wrap_record(22, &msg[..split]));
+        transport_bytes.extend_from_slice(&wrap_record(22, &msg[split..]));
+
+        let mut transport = ChunkRead(&transport_bytes, 1024);
+        let mut buf = [0u8; 4096];
+        let mut reader = RecordReader::new(&mut buf);
+        let mut key_schedule = KeySchedule::<Aes128GcmSha256>::new();
+
+        let record = reader
+            .read_client_hello_blocking(&mut transport, key_schedule.read_state())
+            .expect("reassembles");
+        match record {
+            ServerRecord::Handshake(_) => {}
+            _ => panic!("expected handshake"),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "server")]
+    fn then_interleaved_change_cipher_spec_is_rejected() {
+        let msg = build_client_hello_handshake();
+        let split = 7;
+        let mut transport_bytes = std::vec::Vec::new();
+        transport_bytes.extend_from_slice(&wrap_record(22, &msg[..split]));
+        // ChangeCipherSpec record between fragments.
+        transport_bytes.extend_from_slice(&wrap_record(20, &[0x01]));
+        transport_bytes.extend_from_slice(&wrap_record(22, &msg[split..]));
+
+        let mut transport = ChunkRead(&transport_bytes, 1024);
+        let mut buf = [0u8; 4096];
+        let mut reader = RecordReader::new(&mut buf);
+        let mut key_schedule = KeySchedule::<Aes128GcmSha256>::new();
+
+        let result = reader.read_client_hello_blocking(&mut transport, key_schedule.read_state());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "server")]
+    fn then_interleaved_alert_is_rejected() {
+        let msg = build_client_hello_handshake();
+        let split = 7;
+        let mut transport_bytes = std::vec::Vec::new();
+        transport_bytes.extend_from_slice(&wrap_record(22, &msg[..split]));
+        // Alert record between fragments.
+        transport_bytes.extend_from_slice(&wrap_record(21, &[0x02, 0x0A]));
+        transport_bytes.extend_from_slice(&wrap_record(22, &msg[split..]));
+
+        let mut transport = ChunkRead(&transport_bytes, 1024);
+        let mut buf = [0u8; 4096];
+        let mut reader = RecordReader::new(&mut buf);
+        let mut key_schedule = KeySchedule::<Aes128GcmSha256>::new();
+
+        let result = reader.read_client_hello_blocking(&mut transport, key_schedule.read_state());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "server")]
+    fn then_trailing_bytes_are_rejected() {
+        let msg = build_client_hello_handshake();
+        let mut msg_with_trailing = msg.clone();
+        msg_with_trailing.push(0x00); // trailing byte after complete ClientHello
+        let mut transport_bytes = std::vec::Vec::new();
+        transport_bytes.extend_from_slice(&wrap_record(22, &msg_with_trailing));
+
+        let mut transport = ChunkRead(&transport_bytes, 1024);
+        let mut buf = [0u8; 4096];
+        let mut reader = RecordReader::new(&mut buf);
+        let mut key_schedule = KeySchedule::<Aes128GcmSha256>::new();
+
+        let result = reader.read_client_hello_blocking(&mut transport, key_schedule.read_state());
+        assert!(result.is_err());
     }
 }
